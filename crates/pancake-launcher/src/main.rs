@@ -56,6 +56,7 @@ struct Launcher {
     card: (f32, f32, f32, f32),
     icons: Icons,
     accent: u32,
+    scale: u32,
 }
 
 /// Desktop Settings is always listed, even before PancakeDM is installed.
@@ -128,7 +129,9 @@ fn run() -> Result<(), String> {
         card: (0.0, 0.0, 0.0, 0.0),
         icons: Icons::new(&cfg.icon_theme),
         accent: 0xff00_0000 | pancake_draw::accent::effective(&cfg),
+        scale: cfg.scale,
     };
+    surface.set_buffer_scale(st.scale as i32);
     let mut bufs: Vec<(wl_buffer::WlBuffer, memmap2::MmapMut, (u32, u32))> = Vec::new();
     let fd = conn.backend().poll_fd().as_raw_fd();
 
@@ -141,7 +144,8 @@ fn run() -> Result<(), String> {
             break;
         }
         if st.configured && st.dirty {
-            let (w, h) = st.size;
+            let (lw, lh) = st.size;
+            let (w, h) = (lw * st.scale, lh * st.scale); // physical
             if bufs.first().map_or(true, |b| b.2 != (w, h)) {
                 for b in bufs.drain(..) {
                     b.0.destroy();
@@ -157,7 +161,7 @@ fn run() -> Result<(), String> {
             }
             if let Some(i) = (0..2).find(|&i| st.buffer_free[i]) {
                 let px = pancake_draw::pixels(&mut bufs[i].1);
-                let mut canvas = Canvas { px, w: w as i32, h: h as i32 };
+                let mut canvas = Canvas::new(px, lw as i32, lh as i32, st.scale as f32);
                 st.draw(&mut canvas, &mut fonts);
                 surface.attach(Some(&bufs[i].0), 0, 0);
                 surface.damage_buffer(0, 0, w as i32, h as i32);
@@ -327,7 +331,7 @@ impl Launcher {
             }
             // The app's icon, or a letter badge if it has none we can find.
             let (bx, by) = (tx + TILE_W / 2.0, ty + 42.0);
-            let icon = app.icon.as_ref().and_then(|n| self.icons.get(n, 56));
+            let icon = app.icon.as_ref().and_then(|n| self.icons.get(n, 56 * self.scale));
             if let Some(img) = icon {
                 c.image(img, (bx - 28.0) as i32, (by - 28.0) as i32);
             } else {

@@ -11,6 +11,7 @@
 mod data;
 mod layer;
 mod layout;
+mod anim;
 mod seat;
 mod shm;
 mod subsurface;
@@ -148,6 +149,9 @@ struct Window {
     /// A dialog (has a parent window): floats.
     has_parent: bool,
     last_configure: Option<((i32, i32), Vec<u8>)>,
+    // Animations (see anim.rs).
+    opened_at: Option<std::time::Instant>,
+    slide_from: Option<((i32, i32), std::time::Instant)>,
 }
 
 impl Window {
@@ -178,6 +182,8 @@ impl Window {
             max_size: (0, 0),
             has_parent: false,
             last_configure: None,
+            opened_at: None,
+            slide_from: None,
         }
     }
 }
@@ -223,6 +229,13 @@ pub struct State {
     last_focus: [u32; 10],
     style: Style,
     next_order: u64,
+    /// Output scale: apps draw at this many pixels per logical pixel. The
+    /// compositor works in physical pixels and converts at the protocol.
+    pub(super) scale: i32,
+    outputs: Vec<WlOutput>,
+    ghosts: Vec<anim::Ghost>,
+    /// Workspace switch slide: (from workspace, direction, start).
+    ws_anim: Option<(u32, i32, std::time::Instant)>,
     // Clipboard (see data.rs).
     dh: Option<DisplayHandle>,
     data_devices: Vec<WlDataDevice>,
@@ -257,6 +270,10 @@ impl State {
             last_focus: [0; 10],
             style: Style::default(),
             next_order: 0,
+            scale: 1,
+            outputs: Vec::new(),
+            ghosts: Vec::new(),
+            ws_anim: None,
             dh: Some(dh),
             data_devices: Vec::new(),
             selection: None,
@@ -277,52 +294,45 @@ impl State {
                 self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, None, 0);
             }
         }
-        let focused = self.kb_focus.as_ref().and_then(|s| self.root_window(s));
-        for i in self.visible_order() {
-            let (x, y) = self.origin(i);
-            let w = &self.windows[i];
-            if w.popup.is_some() {
-                self.draw_tree(canvas, &w.surface, x, y, None, 0);
-                continue;
+        // Windows: during a workspace switch, the old workspace slides out
+        // while the new one slides in.
+        match self.ws_slide() {
+            Some((from, out_dx, in_dx)) => {
+                self.draw_windows(canvas, &self.order_for(from, false), out_dx);
+                self.draw_windows(canvas, &self.visible_order(), in_dx);
             }
-            // Toplevels: rounded corners (clipping the app's content) and a
-            // border, accent-colored when focused. Maximized: square, none.
-            let frame = self.frame_rect(i);
-            let (radius, border) = if w.maximized { (0, 0) } else { (self.style.radius, self.style.border) };
-            let clip = (radius > 0).then_some((frame.0, frame.1, frame.2, frame.3, radius));
-            self.draw_tree(canvas, &w.surface, x, y, clip, 0);
-            if border > 0 && frame.2 > 0 {
-                let color = if Some(i) == focused { 0xff00_0000 | self.style.accent } else { 0x40ff_ffff };
-                canvas.ring(frame.0 - border, frame.1 - border, frame.2 + 2 * border, frame.3 + 2 * border, radius + border, border, color);
-            }
+            None => self.draw_windows(canvas, &self.visible_order(), 0),
         }
+        self.draw_ghosts(canvas);
         for layer in [layer::TOP, layer::OVERLAY] {
             for l in self.layers_in(layer) {
-                self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, None, 0);
+                self.draw_tree_a(canvas, &l.surface, l.rect.0, l.rect.1, None, self.layer_alpha(l), 0);
             }
         }
     }
 
     /// A surface and its subsurfaces, with the surface's top-left at (x, y).
-    /// `clip` rounds the corners of a screen rect (x, y, w, h, radius).
+    /// `clip` rounds the corners of a screen rect (x, y, w, h, radius);
+    /// `alpha` fades it all (animations).
     fn draw_tree(&self, canvas: &mut Canvas, surface: &WlSurface, x: i32, y: i32, clip: Option<(i32, i32, i32, i32, i32)>, depth: u32) {
+        self.draw_tree_a(canvas, surface, x, y, clip, 1.0, depth);
+    }
+
+    fn draw_tree_a(&self, canvas: &mut Canvas, surface: &WlSurface, x: i32, y: i32, clip: Option<(i32, i32, i32, i32, i32)>, alpha: f32, depth: u32) {
         if depth > 8 {
             return;
         }
         for sub in self.subsurfaces.iter().filter(|s| s.parent == *surface && !s.above) {
-            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, clip, depth + 1);
+            self.draw_tree_a(canvas, &sub.surface, x + sub.x, y + sub.y, clip, alpha, depth + 1);
         }
         if let Some(data) = surface.data::<Mutex<SurfaceState>>() {
             let s = data.lock().unwrap();
             if s.width > 0 {
-                match clip {
-                    Some(c) => canvas.blit_rounded(x, y, s.width, s.height, &s.pixels, s.opaque, c),
-                    None => canvas.blit(x, y, s.width, s.height, &s.pixels, s.opaque),
-                }
+                canvas.blit_ex(x, y, s.width, s.height, &s.pixels, s.opaque, clip, alpha);
             }
         }
         for sub in self.subsurfaces.iter().filter(|s| s.parent == *surface && s.above) {
-            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, clip, depth + 1);
+            self.draw_tree_a(canvas, &sub.surface, x + sub.x, y + sub.y, clip, alpha, depth + 1);
         }
     }
 
@@ -385,10 +395,13 @@ impl State {
             let w = &self.windows[idx];
             let Some(p) = w.parent.as_ref().and_then(|p| self.windows.iter().position(|o| o.surface == *p)) else {
                 // Tiled/maximized: the frame goes in the tile, so the
-                // surface starts at the tile minus the shadow offset.
+                // surface starts at the tile minus the shadow offset. Right
+                // after a layout change it glides there from where it was.
                 if let Some((tx, ty, _, _)) = w.tile {
                     let (gx, gy) = self.geom_offset(idx);
-                    return (x + tx - gx, y + ty - gy);
+                    let target = (tx - gx, ty - gy);
+                    let (px, py) = anim::glide(w.slide_from, target);
+                    return (x + px, y + py);
                 }
                 return (x + w.x, y + w.y);
             };
@@ -446,6 +459,31 @@ impl State {
         true
     }
 
+    /// Change the output scale: tell apps (they redraw at the new scale)
+    /// and lay everything out again.
+    pub fn set_scale(&mut self, scale: i32) {
+        let scale = scale.clamp(1, 3);
+        if scale == self.scale {
+            return;
+        }
+        self.scale = scale;
+        self.outputs.retain(|o| o.is_alive());
+        for o in &self.outputs {
+            if o.version() >= 2 {
+                o.scale(scale);
+                o.done();
+            }
+        }
+        for w in &mut self.windows {
+            w.last_configure = None;
+        }
+        for l in &mut self.layers {
+            l.force_configure();
+        }
+        self.arrange_layers();
+        self.relayout();
+    }
+
     pub fn set_output_size(&mut self, width: u32, height: u32) {
         self.output.0 = width;
         self.output.1 = height;
@@ -469,6 +507,7 @@ impl State {
         }
         if !self.windows[i].floating {
             self.windows[i].placed = true;
+            self.windows[i].opened_at = Some(std::time::Instant::now());
             let surface = self.windows[i].surface.clone();
             self.set_keyboard_focus(Some(surface));
             self.refresh_pointer_focus();
@@ -483,6 +522,7 @@ impl State {
         win.x = ux + ((uw - gw) / 2).max(0) - gx + step;
         win.y = uy + ((uh - gh) / 2).max(0) - gy + step;
         win.placed = true;
+        win.opened_at = Some(std::time::Instant::now());
         self.placed_count += 1;
         // A new window gets the keyboard.
         let surface = win.surface.clone();
@@ -500,10 +540,27 @@ pub struct SurfaceState {
     /// Some(Some) = new buffer attached, Some(None) = detached, None = unchanged.
     pending_buffer: Option<Option<WlBuffer>>,
     pending_frames: Vec<WlCallback>,
+    /// Pixels at display size: buffer size * output scale / buffer scale.
     pixels: Vec<u32>,
     width: u32,
     height: u32,
     opaque: bool,
+    /// wl_surface.set_buffer_scale (pending, applied on commit).
+    pending_scale: Option<i32>,
+    buffer_scale: i32,
+}
+
+/// Nearest-neighbour resize (for apps whose buffer scale doesn't match).
+fn resize_nearest(px: &[u32], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u32> {
+    let mut out = Vec::with_capacity((nw * nh) as usize);
+    for y in 0..nh {
+        let sy = (y as u64 * h as u64 / nh.max(1) as u64) as u32;
+        for x in 0..nw {
+            let sx = (x as u64 * w as u64 / nw.max(1) as u64) as u32;
+            out.push(px[(sy * w + sx) as usize]);
+        }
+    }
+    out
 }
 
 impl GlobalDispatch<WlCompositor, ()> for State {
@@ -516,7 +573,7 @@ impl Dispatch<WlCompositor, ()> for State {
     fn request(_: &mut Self, _: &Client, _: &WlCompositor, request: wl_compositor::Request, _: &(), _: &DisplayHandle, init: &mut DataInit<'_, Self>) {
         match request {
             wl_compositor::Request::CreateSurface { id } => {
-                init.init(id, Mutex::new(SurfaceState::default()));
+                init.init(id, Mutex::new(SurfaceState { buffer_scale: 1, ..SurfaceState::default() }));
             }
             wl_compositor::Request::CreateRegion { id } => {
                 init.init(id, ());
@@ -536,15 +593,26 @@ impl Dispatch<WlSurface, Mutex<SurfaceState>> for State {
                 let cb = init.init(callback, ());
                 data.lock().unwrap().pending_frames.push(cb);
             }
+            wl_surface::Request::SetBufferScale { scale } => {
+                data.lock().unwrap().pending_scale = Some(scale.max(1));
+            }
             wl_surface::Request::Commit => {
                 let mut s = data.lock().unwrap();
+                if let Some(bs) = s.pending_scale.take() {
+                    s.buffer_scale = bs;
+                }
+                let out_scale = state.scale;
                 match s.pending_buffer.take() {
                     Some(Some(buf)) => {
                         if let Some(b) = buf.data::<BufferData>() {
                             if let Some(px) = b.read() {
-                                s.pixels = px;
-                                s.width = b.width;
-                                s.height = b.height;
+                                // Show it at output scale: a 2x buffer on a 2x
+                                // output is 1:1; a 1x buffer gets upscaled.
+                                let bs = s.buffer_scale.max(1);
+                                let (dw, dh) = ((b.width as i32 * out_scale / bs) as u32, (b.height as i32 * out_scale / bs) as u32);
+                                s.pixels = if (dw, dh) == (b.width, b.height) { px } else { resize_nearest(&px, b.width, b.height, dw, dh) };
+                                s.width = dw;
+                                s.height = dh;
                                 s.opaque = b.opaque;
                             }
                         }
@@ -626,11 +694,12 @@ impl Dispatch<WlBuffer, BufferData> for State {
 impl GlobalDispatch<WlOutput, ()> for State {
     fn bind(state: &mut Self, _: &DisplayHandle, _: &Client, resource: New<WlOutput>, _: &(), init: &mut DataInit<'_, Self>) {
         let out = init.init(resource, ());
+        state.outputs.push(out.clone());
         let (w, h, refresh) = state.output;
         out.geometry(0, 0, 0, 0, wl_output::Subpixel::Unknown, "PancakeDM".into(), "Screen".into(), wl_output::Transform::Normal);
         out.mode(wl_output::Mode::Current | wl_output::Mode::Preferred, w as i32, h as i32, refresh as i32);
         if out.version() >= 2 {
-            out.scale(1);
+            out.scale(state.scale);
             out.done();
         }
     }

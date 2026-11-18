@@ -135,6 +135,7 @@ Everything the user can change lives in one file,
 wallpaper = pancakes.jpg      # a name in a wallpaper folder, a path, or empty
 wallpaper-mode = fill         # fill, fit, center, stretch
 background = #f4a259          # shown with no wallpaper, or around "fit"
+scale = 1                     # 1, 2 or 3 for HiDPI screens
 
 [panel]
 position = top                # top or bottom
@@ -208,6 +209,56 @@ one. Actions: `terminal`, `launcher`, `close`, `toggle-floating`,
 `move-to-workspace N`, `spawn COMMAND`, `quit`. Combos match physical
 keys, so they don't move when the keyboard layout changes. Any action can
 also be run from outside: `pancake-compositor msg action workspace 3`.
+
+## Scaling
+
+`scale` (1, 2 or 3) is the number of pixels per logical pixel. The
+compositor tells apps through `wl_output.scale`, so GTK and others draw
+sharp 2x/3x buffers and set their buffer scale. Internally the compositor
+works in physical pixels and converts at the protocol boundary: window
+geometry, subsurface positions, popup placement, configure sizes, layer
+sizes/margins/zones and pointer coordinates. Buffers whose scale doesn't
+match the output (older apps) are resized on commit. The config's gaps,
+radius and border are logical too.
+
+The shell programs draw through `pancake-draw`'s `Canvas`, which takes a
+scale: drawing code uses logical coordinates and gets crisp output.
+Fractional scales (125%, 150%) are a later step.
+
+## Animations
+
+Everything eases out (fast start, gentle stop):
+
+- windows fade and slide up a little when they open (220 ms);
+- closed windows fade and sink from a snapshot of their last frame
+  (180 ms), and so do closing overlays like the launcher;
+- tiles glide to their new place after a layout change (240 ms);
+- switching workspaces slides the old one out and the new one in (280 ms);
+- overlays fade in (170 ms); the panel's cards fade and slide.
+
+While anything moves the compositor draws every frame (paced by the
+screen as usual), then goes back to drawing only on changes.
+
+## Media and quick settings
+
+The panel shows what's playing (MPRIS through `playerctl`): album art,
+title and artist, and play/pause. Clicking it opens a media card with big
+art, a live progress bar and previous/play/next.
+
+Status icons (network, Bluetooth, volume) open the control center: Wi-Fi
+and Bluetooth tiles, a volume slider (click the icon to mute) and
+brightness when there's a backlight, Desktop Settings, and log out,
+suspend, restart and power off (each asks for a second click).
+
+These use common command-line tools: `playerctl`, `wpctl` (PipeWire),
+`nmcli` (NetworkManager), `bluetoothctl` (BlueZ), `brightnessctl` and
+`loginctl` (logind or elogind). Anything missing is just hidden. They run
+on a background thread, publishing each result as it arrives, so the bar
+never waits on them. Album art from URLs is downloaded once with `curl`
+and cached in `~/.cache/pancake/art`.
+
+`PANCAKE_PANEL_OPEN=control` (or `media`) opens a card at startup, for
+testing and screenshots.
 
 ## Accent from the wallpaper
 

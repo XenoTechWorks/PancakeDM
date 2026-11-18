@@ -183,7 +183,7 @@ impl State {
         match target {
             Some((surface, sx, sy)) if Some(&surface) == self.pointer_focus.as_ref() => {
                 for p in self.pointers_for(&surface) {
-                    p.motion(time, sx, sy);
+                    p.motion(time, sx / self.scale as f64, sy / self.scale as f64);
                 }
                 self.pointer_frame(&surface);
             }
@@ -197,7 +197,7 @@ impl State {
                 }
                 if let Some((surface, sx, sy)) = target {
                     for p in self.pointers_for(&surface) {
-                        p.enter(serial, &surface, sx, sy);
+                        p.enter(serial, &surface, sx / self.scale as f64, sy / self.scale as f64);
                     }
                     self.pointer_frame(&surface);
                     self.pointer_focus = Some(surface);

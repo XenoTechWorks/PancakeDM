@@ -61,6 +61,8 @@ pub struct Config {
     pub wallpaper_mode: WallpaperMode,
     /// 0xRRGGBB, shown with no wallpaper or around a "fit" one.
     pub background: u32,
+    /// UI scale for HiDPI screens: 1, 2 or 3.
+    pub scale: u32,
     pub panel_position: PanelPosition,
     pub clock_24h: bool,
     pub show_date: bool,
@@ -89,6 +91,7 @@ impl Default for Config {
             wallpaper: "pancakes.jpg".into(),
             wallpaper_mode: WallpaperMode::Fill,
             background: 0xf4a259,
+            scale: 1,
             panel_position: PanelPosition::Top,
             clock_24h: true,
             show_date: true,
@@ -230,6 +233,7 @@ pub fn parse(text: &str) -> Config {
             }
             ("desktop", "wallpaper-mode") => WallpaperMode::parse(v).map(|m| c.wallpaper_mode = m).is_some(),
             ("desktop", "background") => parse_color(v).map(|x| c.background = x).is_some(),
+            ("desktop", "scale") => v.parse().ok().filter(|s: &u32| (1..=3).contains(s)).map(|s| c.scale = s).is_some(),
             ("panel", "position") => match v {
                 "top" => Some(PanelPosition::Top),
                 "bottom" => Some(PanelPosition::Bottom),
@@ -297,6 +301,8 @@ pub fn to_text(c: &Config) -> String {
          # fill, fit, center or stretch\n\
          wallpaper-mode = {}\n\
          background = #{:06x}\n\
+         # 1, 2 or 3 (HiDPI screens)\n\
+         scale = {}\n\
          \n\
          [panel]\n\
          # top or bottom\n\
@@ -328,6 +334,7 @@ pub fn to_text(c: &Config) -> String {
         c.wallpaper,
         c.wallpaper_mode.name(),
         c.background,
+        c.scale,
         if c.panel_position == PanelPosition::Top { "top" } else { "bottom" },
         if c.clock_24h { "24h" } else { "12h" },
         c.show_date,
@@ -450,6 +457,7 @@ mod tests {
         c.accent = 0x3d5a80;
         c.accent_auto = false;
         c.layout = Layout::Floating;
+        c.scale = 2;
         c.keybinds = vec![("super+t".into(), "spawn foot".into())];
         assert_eq!(parse(&to_text(&c)), c);
     }

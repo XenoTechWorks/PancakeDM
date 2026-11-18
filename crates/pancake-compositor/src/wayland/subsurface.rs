@@ -47,8 +47,8 @@ impl Dispatch<WlSubsurface, SubData> for State {
         let Some(i) = state.subsurfaces.iter().position(|s| s.surface == data.surface) else { return };
         match request {
             wl_subsurface::Request::SetPosition { x, y } => {
-                state.subsurfaces[i].x = x;
-                state.subsurfaces[i].y = y;
+                state.subsurfaces[i].x = x * state.scale;
+                state.subsurfaces[i].y = y * state.scale;
             }
             wl_subsurface::Request::PlaceAbove { sibling } => state.restack(i, &sibling, true),
             wl_subsurface::Request::PlaceBelow { sibling } => state.restack(i, &sibling, false),

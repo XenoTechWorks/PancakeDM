@@ -23,19 +23,31 @@ fn bases() -> Vec<PathBuf> {
     out
 }
 
+/// Icon contexts to look in: app icons first, then the rest (status,
+/// actions, ... for symbolic UI icons).
+const CONTEXTS: [&str; 9] = ["apps", "status", "actions", "devices", "places", "categories", "mimetypes", "emblems", "legacy"];
+
 /// Size folders to try for `size`: exact, then bigger (downscaling looks
-/// better), then smaller; then scalable.
-fn size_dirs(size: u32) -> Vec<String> {
+/// better), then smaller; then scalable and symbolic.
+fn size_dirs(size: u32, symbolic: bool) -> Vec<String> {
     let mut sizes: Vec<u32> = SIZES.iter().copied().filter(|&s| s >= size).collect();
     sizes.extend(SIZES.iter().rev().copied().filter(|&s| s < size));
+    let contexts: &[&str] = if symbolic { &CONTEXTS } else { &CONTEXTS[..1] };
     let mut dirs = Vec::new();
-    for s in sizes {
-        dirs.push(format!("{s}x{s}/apps"));
-        dirs.push(format!("apps/{s}")); // Breeze-style layout
-        dirs.push(format!("{s}x{s}@2/apps"));
+    if symbolic {
+        for c in contexts {
+            dirs.push(format!("symbolic/{c}")); // GNOME 46+ layout
+        }
     }
-    dirs.push("scalable/apps".into());
-    dirs.push("apps/scalable".into());
+    for c in contexts {
+        for s in &sizes {
+            dirs.push(format!("{s}x{s}/{c}"));
+            dirs.push(format!("{c}/{s}")); // Breeze-style layout
+            dirs.push(format!("{s}x{s}@2/{c}"));
+        }
+        dirs.push(format!("scalable/{c}"));
+        dirs.push(format!("{c}/scalable"));
+    }
     dirs
 }
 
@@ -53,7 +65,7 @@ pub fn find(name: &str, size: u32, theme: &str) -> Option<PathBuf> {
         }
     }
     let bases = bases();
-    let dirs = size_dirs(size);
+    let dirs = size_dirs(size, name.ends_with("-symbolic"));
     for t in &themes {
         for base in &bases {
             let theme_dir = base.join(t);
@@ -97,6 +109,23 @@ impl Icons {
             self.theme = theme.to_string();
             self.cache.clear();
         }
+    }
+
+    /// A symbolic icon (e.g. "audio-volume-high-symbolic") recolored to
+    /// `color` (straight-alpha 0xAARRGGBB): its shape is used as a mask.
+    pub fn symbolic(&mut self, name: &str, size: u32, color: u32) -> Option<Image> {
+        let img = self.get(name, size)?;
+        let (ca, rgb) = (color >> 24, color & 0xff_ffff);
+        let px = img
+            .px
+            .iter()
+            .map(|&p| {
+                let a = ((p >> 24) * ca + 127) / 255;
+                let ch = |s: u32| ((((rgb >> s) & 0xff) * a + 127) / 255) << s;
+                (a << 24) | ch(16) | ch(8) | ch(0)
+            })
+            .collect();
+        Some(Image { w: img.w, h: img.h, px })
     }
 
     pub fn get(&mut self, name: &str, size: u32) -> Option<&Image> {

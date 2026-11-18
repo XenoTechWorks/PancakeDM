@@ -99,6 +99,10 @@ impl State {
     pub fn relayout(&mut self) {
         let (ux, uy, uw, uh) = self.usable;
         let g = self.style.gaps;
+        // Where each window is now, so moved tiles can glide from there.
+        let before: Vec<Option<(i32, i32)>> =
+            (0..self.windows.len()).map(|i| (self.windows[i].placed && self.windows[i].tile.is_some()).then(|| self.origin(i))).collect();
+        let old_tiles: Vec<Option<Rect>> = self.windows.iter().map(|w| w.tile).collect();
         for ws in 1..=9 {
             let mut tiled: Vec<usize> = (0..self.windows.len()).filter(|&i| self.windows[i].workspace == ws && self.is_tiled(i)).collect();
             tiled.sort_by_key(|&i| self.windows[i].order);
@@ -116,6 +120,11 @@ impl State {
                 w.tile = Some((ux, uy, uw, uh));
             } else if w.floating {
                 w.tile = None;
+            }
+            if let (Some(from), Some(_)) = (before[i], self.windows[i].tile) {
+                if old_tiles[i] != self.windows[i].tile {
+                    self.windows[i].slide_from = Some((from, std::time::Instant::now()));
+                }
             }
             self.send_configure(i);
         }
@@ -145,7 +154,8 @@ impl State {
             return;
         }
         self.windows[i].last_configure = Some((size, bytes.clone()));
-        tl.configure(size.0, size.1, bytes);
+        // Apps think in logical pixels.
+        tl.configure(size.0 / self.scale, size.1 / self.scale, bytes);
         let serial = self.next_serial();
         self.windows[i].xdg.configure(serial);
     }
@@ -153,7 +163,12 @@ impl State {
     /// Windows to draw on the active workspace, bottom to top: tiled,
     /// maximized, floating, then popups.
     pub(super) fn visible_order(&self) -> Vec<usize> {
-        let on = |i: usize| self.windows[i].placed && self.workspace_of(i) == self.active_ws;
+        self.order_for(self.active_ws, true)
+    }
+
+    /// Like visible_order for any workspace (popups only when asked).
+    pub(super) fn order_for(&self, ws: u32, with_popups: bool) -> Vec<usize> {
+        let on = |i: usize| self.windows[i].placed && self.workspace_of(i) == ws && (with_popups || self.windows[i].popup.is_none());
         let mut tiled: Vec<usize> = (0..self.windows.len()).filter(|&i| on(i) && self.is_tiled(i)).collect();
         tiled.sort_by_key(|&i| self.windows[i].order);
         let maxed = (0..self.windows.len()).filter(|&i| on(i) && self.windows[i].toplevel.is_some() && self.windows[i].maximized && !self.windows[i].floating);
@@ -233,6 +248,8 @@ impl State {
             return;
         }
         self.dismiss_popups();
+        let dir = if ws > self.active_ws { 1 } else { -1 };
+        self.ws_anim = Some((self.active_ws, dir, std::time::Instant::now()));
         self.active_ws = ws;
         self.dirty = true;
         self.focus_something();

@@ -34,6 +34,8 @@ pub struct Layer {
     configured: bool,
     /// Where it is on screen, once arranged.
     pub rect: (i32, i32, i32, i32),
+    /// When it first showed content (it fades in).
+    pub mapped_at: Option<std::time::Instant>,
 }
 
 pub struct LayerData {
@@ -46,14 +48,18 @@ impl State {
     pub(super) fn arrange_layers(&mut self) {
         let (ow, oh) = (self.output.0 as i32, self.output.1 as i32);
         let mut usable = (0, 0, ow, oh); // x, y, w, h
+        let s = self.scale;
         for i in 0..self.layers.len() {
             let l = &self.layers[i];
-            let (t, r, b, lm) = l.margin;
+            // Apps give sizes, margins and zones in logical pixels.
+            let (t, r, b, lm) = (l.margin.0 * s, l.margin.1 * s, l.margin.2 * s, l.margin.3 * s);
+            let zone = l.zone * s;
+            let size = (l.size.0 as i32 * s, l.size.1 as i32 * s);
             let a = l.anchor;
             let both_h = a & (ANCHOR_LEFT | ANCHOR_RIGHT) == (ANCHOR_LEFT | ANCHOR_RIGHT);
             let both_v = a & (ANCHOR_TOP | ANCHOR_BOTTOM) == (ANCHOR_TOP | ANCHOR_BOTTOM);
-            let w = if l.size.0 == 0 { ow - lm - r } else { l.size.0 as i32 };
-            let h = if l.size.1 == 0 { oh - t - b } else { l.size.1 as i32 };
+            let w = if size.0 == 0 { ow - lm - r } else { size.0 };
+            let h = if size.1 == 0 { oh - t - b } else { size.1 };
             let x = match (a & ANCHOR_LEFT != 0, a & ANCHOR_RIGHT != 0) {
                 (true, false) => lm,
                 (false, true) => ow - w - r,
@@ -65,23 +71,23 @@ impl State {
                 _ => (oh - h) / 2,
             };
             // Reserve space along the one edge it's attached to.
-            if l.zone > 0 {
+            if zone > 0 {
                 if a & ANCHOR_TOP != 0 && !both_v {
-                    let edge = t + l.zone;
+                    let edge = t + zone;
                     if edge > usable.1 {
                         usable.3 -= edge - usable.1;
                         usable.1 = edge;
                     }
                 } else if a & ANCHOR_BOTTOM != 0 && !both_v {
-                    usable.3 = usable.3.min(oh - b - l.zone - usable.1);
+                    usable.3 = usable.3.min(oh - b - zone - usable.1);
                 } else if a & ANCHOR_LEFT != 0 && !both_h {
-                    let edge = lm + l.zone;
+                    let edge = lm + zone;
                     if edge > usable.0 {
                         usable.2 -= edge - usable.0;
                         usable.0 = edge;
                     }
                 } else if a & ANCHOR_RIGHT != 0 && !both_h {
-                    usable.2 = usable.2.min(ow - r - l.zone - usable.0);
+                    usable.2 = usable.2.min(ow - r - zone - usable.0);
                 }
             }
             let rect = (x, y, w.max(0), h.max(0));
@@ -90,7 +96,7 @@ impl State {
             if changed {
                 self.layers[i].configured = true;
                 let serial = self.next_serial();
-                self.layers[i].resource.configure(serial, rect.2 as u32, rect.3 as u32);
+                self.layers[i].resource.configure(serial, (rect.2 / s) as u32, (rect.3 / s) as u32);
             }
         }
         let changed = self.usable != usable;
@@ -104,6 +110,14 @@ impl State {
     /// Layer surfaces in one layer, bottom to top.
     pub(super) fn layers_in(&self, layer: u32) -> impl Iterator<Item = &Layer> {
         self.layers.iter().filter(move |l| l.layer == layer)
+    }
+}
+
+impl Layer {
+    /// Send a configure on the next arrange even if the size is the same
+    /// (the scale changed, so the logical size did).
+    pub fn force_configure(&mut self) {
+        self.configured = false;
     }
 }
 
@@ -132,6 +146,7 @@ impl Dispatch<ZwlrLayerShellV1, ()> for State {
                 keyboard: 0,
                 configured: false,
                 rect: (0, 0, 0, 0),
+                mapped_at: None,
             });
         }
     }
@@ -153,6 +168,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerData> for State {
     }
 
     fn destroyed(state: &mut Self, _: ClientId, _: &ZwlrLayerSurfaceV1, data: &LayerData) {
+        state.ghost_layer(&data.surface);
         state.layers.retain(|l| l.surface != data.surface);
         state.forget_surface(&data.surface);
         state.arrange_layers();
@@ -166,7 +182,13 @@ impl State {
         let Some(l) = self.layers.iter().find(|l| l.surface == *surface) else { return };
         // Overlays like the launcher take the keyboard once they're showing;
         // it goes back to the top window when they close (forget_surface).
-        let grabs = l.keyboard == 1 && l.layer >= TOP && super::surface_size(surface).0 > 0;
+        let has_content = super::surface_size(surface).0 > 0;
+        let grabs = l.keyboard == 1 && l.layer >= TOP && has_content;
+        if has_content {
+            if let Some(l) = self.layers.iter_mut().find(|l| l.surface == *surface) {
+                l.mapped_at.get_or_insert_with(std::time::Instant::now);
+            }
+        }
         self.arrange_layers();
         if grabs && self.kb_focus.as_ref() != Some(surface) {
             self.set_keyboard_focus(Some(surface.clone()));

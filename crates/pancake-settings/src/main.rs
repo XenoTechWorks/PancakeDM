@@ -17,7 +17,7 @@ use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 const W: u32 = 780;
-const H: u32 = 700;
+const H: u32 = 746;
 const RADIUS: f32 = 18.0;
 const WINDOW_BG: u32 = 0xff221c18;
 const HEADER_BG: u32 = 0xff2a231e;
@@ -37,6 +37,7 @@ enum Action {
     Accent(u32),
     AccentAuto,
     Layout(Layout),
+    Scale(u32),
     /// Page through the wallpapers (-1 / +1).
     Page(i32),
 }
@@ -77,11 +78,12 @@ fn round_corners(img: &mut Image, r: f32) {
     }
 }
 
-fn thumbnail(path: &PathBuf) -> Option<Image> {
+fn thumbnail(path: &PathBuf, scale: u32) -> Option<Image> {
     let img = images::load(path, None)?;
-    let px = images::wallpaper(&img, THUMB.0, THUMB.1, images::Fit::Fill, 0);
-    let mut t = Image { w: THUMB.0, h: THUMB.1, px };
-    round_corners(&mut t, 12.0);
+    let (w, h) = (THUMB.0 * scale, THUMB.1 * scale);
+    let px = images::wallpaper(&img, w, h, images::Fit::Fill, 0);
+    let mut t = Image { w, h, px };
+    round_corners(&mut t, 12.0 * scale as f32);
     Some(t)
 }
 
@@ -98,8 +100,9 @@ fn run() -> Result<(), String> {
     let mut fonts = Fonts::load()?;
     let mut cfg = pancake_config::load();
     let mut watch = pancake_config::Watcher::new();
+    let scale = cfg.scale; // read once; reopen Settings after changing it
     let walls: Vec<(PathBuf, Option<Image>)> = pancake_config::list_wallpapers().into_iter().map(|p| {
-        let t = thumbnail(&p);
+        let t = thumbnail(&p, scale);
         (p, t)
     }).collect();
 
@@ -120,11 +123,13 @@ fn run() -> Result<(), String> {
     toplevel.set_max_size(W as i32, H as i32);
     surface.commit();
 
+    surface.set_buffer_scale(scale as i32);
+    let (pw, ph) = (W * scale, H * scale);
     let mut bufs = Vec::new();
     for i in 0..2 {
-        let (file, mem) = pancake_draw::shm_file((W * H * 4) as u64, &format!("settings-{i}"))?;
-        let pool = shm.create_pool(file.as_fd(), (W * H * 4) as i32, &qh, ());
-        let buffer = pool.create_buffer(0, W as i32, H as i32, (W * 4) as i32, wl_shm::Format::Argb8888, &qh, i);
+        let (file, mem) = pancake_draw::shm_file((pw * ph * 4) as u64, &format!("settings-{i}"))?;
+        let pool = shm.create_pool(file.as_fd(), (pw * ph * 4) as i32, &qh, ());
+        let buffer = pool.create_buffer(0, pw as i32, ph as i32, (pw * 4) as i32, wl_shm::Format::Argb8888, &qh, i);
         pool.destroy();
         bufs.push((buffer, mem));
     }
@@ -173,10 +178,10 @@ fn run() -> Result<(), String> {
         if app.configured && app.dirty {
             if let Some(i) = (0..2).find(|&i| app.buffer_free[i]) {
                 let px = pancake_draw::pixels(&mut bufs[i].1);
-                let mut c = Canvas { px, w: W as i32, h: H as i32 };
+                let mut c = Canvas::new(px, W as i32, H as i32, scale as f32);
                 hits = draw(&mut c, &mut fonts, &cfg, &walls, page, app.pointer);
                 surface.attach(Some(&bufs[i].0), 0, 0);
-                surface.damage_buffer(0, 0, W as i32, H as i32);
+                surface.damage_buffer(0, 0, pw as i32, ph as i32);
                 surface.commit();
                 app.buffer_free[i] = false;
                 app.dirty = false;
@@ -207,6 +212,7 @@ fn apply(cfg: &mut Config, a: Action) {
         }
         Action::AccentAuto => cfg.accent_auto = true,
         Action::Layout(l) => cfg.layout = l,
+        Action::Scale(n) => cfg.scale = n,
         Action::Drag | Action::Close | Action::Page(_) => {}
     }
 }
@@ -363,6 +369,10 @@ fn draw(c: &mut Canvas, fonts: &mut Fonts, cfg: &Config, walls: &[(PathBuf, Opti
     y += 18.0;
     c.text(fonts, "New windows", label_x, y + 22.0, 14.0, false, TEXT_DIM);
     hits.extend(segmented(c, fonts, ctrl_x, y, &[("Tile", Action::Layout(Layout::Tiling), cfg.layout == Layout::Tiling), ("Float", Action::Layout(Layout::Floating), cfg.layout == Layout::Floating)], accent, pointer));
+    y += 46.0;
+    c.text(fonts, "Scale", label_x, y + 22.0, 14.0, false, TEXT_DIM);
+    hits.extend(segmented(c, fonts, ctrl_x, y, &[("100%", Action::Scale(1), cfg.scale == 1), ("200%", Action::Scale(2), cfg.scale == 2), ("300%", Action::Scale(3), cfg.scale == 3)], accent, pointer));
+    c.text(fonts, "for HiDPI screens", ctrl_x + 210.0, y + 22.0, 12.0, false, TEXT_FAINT);
 
     // Accent color: "Auto" (from the wallpaper) first, then fixed colors.
     y += 70.0;

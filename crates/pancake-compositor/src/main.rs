@@ -239,9 +239,10 @@ fn terminal_command(cfg: &pancake_config::Config) -> Option<String> {
 /// The window style from the config (accent from the wallpaper if auto).
 fn style_from(cfg: &pancake_config::Config) -> wayland::Style {
     wayland::Style {
-        gaps: cfg.gaps as i32,
-        radius: cfg.corner_radius as i32,
-        border: cfg.border as i32,
+        // Logical pixels in the config; the compositor draws physical ones.
+        gaps: (cfg.gaps * cfg.scale) as i32,
+        radius: (cfg.corner_radius * cfg.scale) as i32,
+        border: (cfg.border * cfg.scale) as i32,
         accent: pancake_draw::accent::effective(cfg),
         new_windows_float: cfg.layout == pancake_config::Layout::Floating,
     }
@@ -305,6 +306,7 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
             cfg.wallpaper.clear(); // --fill means a plain color
         }
         scene.configure(&cfg, fill);
+        wl.set_scale(cfg.scale as i32);
         wl.set_style(style_from(&cfg));
         let (b, warnings) = keybinds::Keybinds::from_config(&cfg.keybinds);
         for w in warnings {
@@ -529,6 +531,10 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
         if pointer.pixel() != before.pixel() {
             let (x, y) = pointer.pixel();
             backend.pointer_moved(x, y);
+        }
+        // Animations: keep drawing until everything has settled.
+        if wl.animating() {
+            dirty.fill(true);
         }
         // An app committed new content (or a window moved or went away).
         if wl.dirty {

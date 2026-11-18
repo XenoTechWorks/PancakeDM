@@ -83,9 +83,12 @@ impl State {
         self.send_configure(i);
     }
 
-    /// Position a popup relative to its parent, kept on screen.
+    /// Position a popup relative to its parent, kept on screen (physical
+    /// pixels; the positioner is in logical ones).
     fn popup_rect(&self, parent: Option<&WlSurface>, pos: &Positioner) -> (i32, i32, i32, i32) {
+        let s = self.scale;
         let (x, y, w, h) = pos.place();
+        let (x, y, w, h) = (x * s, y * s, w * s, h * s);
         let Some(p) = parent.and_then(|p| self.windows.iter().position(|w| w.surface == *p)) else { return (x, y, w, h) };
         let (ox, oy) = self.origin(p);
         let (gx, gy) = self.geom_offset(p);
@@ -164,14 +167,16 @@ impl Dispatch<XdgSurface, XdgData> for State {
                 win.y = y;
                 win.placed = true;
                 state.windows.push(win);
-                popup.configure(x, y, w, h);
+                let s = state.scale;
+                popup.configure(x / s, y / s, w / s, h / s);
                 let serial = state.next_serial();
                 xdg.configure(serial);
                 state.dirty = true;
             }
             xdg_surface::Request::SetWindowGeometry { x, y, width, height } => {
                 if let Some(w) = state.windows.iter_mut().find(|w| w.surface == data.surface) {
-                    w.geometry = Some((x, y, width, height));
+                    let s = state.scale;
+                    w.geometry = Some((x * s, y * s, width * s, height * s));
                 }
             }
             _ => {}
@@ -190,12 +195,12 @@ impl Dispatch<XdgToplevel, XdgData> for State {
             }
             xdg_toplevel::Request::SetMinSize { width, height } => {
                 if let Some(i) = find(state) {
-                    state.windows[i].min_size = (width, height);
+                    state.windows[i].min_size = (width * state.scale, height * state.scale);
                 }
             }
             xdg_toplevel::Request::SetMaxSize { width, height } => {
                 if let Some(i) = find(state) {
-                    state.windows[i].max_size = (width, height);
+                    state.windows[i].max_size = (width * state.scale, height * state.scale);
                 }
             }
             xdg_toplevel::Request::SetParent { parent } => {
@@ -232,6 +237,7 @@ impl Dispatch<XdgToplevel, XdgData> for State {
 
     fn destroyed(state: &mut Self, _: ClientId, toplevel: &XdgToplevel, _: &XdgData) {
         if let Some(i) = state.windows.iter().position(|w| w.toplevel.as_ref() == Some(toplevel)) {
+            state.ghost_window(i); // fade it out from its last frame
             let surface = state.windows.remove(i).surface;
             state.forget_surface(&surface);
             state.relayout();
@@ -253,7 +259,8 @@ impl Dispatch<XdgPopup, XdgData> for State {
                 state.windows[i].x = x;
                 state.windows[i].y = y;
                 popup.repositioned(token);
-                popup.configure(x, y, w, h);
+                let s = state.scale;
+                popup.configure(x / s, y / s, w / s, h / s);
                 let serial = state.next_serial();
                 state.windows[i].xdg.configure(serial);
                 state.dirty = true;

@@ -127,6 +127,53 @@ impl Canvas<'_> {
         }
     }
 
+    /// The general case: optional rounded clip and an overall `alpha`
+    /// (for fades). Falls back to the fast paths when it can.
+    pub fn blit_ex(&mut self, x: i32, y: i32, w: u32, h: u32, src: &[u32], opaque: bool, clip: Option<(i32, i32, i32, i32, i32)>, alpha: f32) {
+        if alpha >= 0.999 {
+            return match clip {
+                Some(c) => self.blit_rounded(x, y, w, h, src, opaque, c),
+                None => self.blit(x, y, w, h, src, opaque),
+            };
+        }
+        if alpha <= 0.001 || src.len() < (w * h) as usize {
+            return;
+        }
+        let sx0 = (-x).max(0) as u32;
+        let sx1 = w.min((self.width as i32 - x).max(0) as u32);
+        let sy0 = (-y).max(0) as u32;
+        let sy1 = h.min((self.height as i32 - y).max(0) as u32);
+        for sy in sy0..sy1 {
+            let py = y + sy as i32;
+            for sx in sx0..sx1 {
+                let px = x + sx as i32;
+                let mut s = src[(sy * w + sx) as usize];
+                if opaque {
+                    s |= 0xff00_0000;
+                }
+                let mut cover = alpha;
+                if let Some((cx, cy, cw, ch, r)) = clip {
+                    let in_corner = r > 0
+                        && px >= cx && px < cx + cw && py >= cy && py < cy + ch
+                        && (px < cx + r || px >= cx + cw - r)
+                        && (py < cy + r || py >= cy + ch - r);
+                    if in_corner {
+                        let rf = r as f32;
+                        let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+                        let ccx = fx.max(cx as f32 + rf).min((cx + cw) as f32 - rf);
+                        let ccy = fy.max(cy as f32 + rf).min((cy + ch) as f32 - rf);
+                        let d = ((fx - ccx).powi(2) + (fy - ccy).powi(2)).sqrt() - rf;
+                        cover *= (0.5 - d).clamp(0.0, 1.0);
+                    }
+                }
+                if cover > 0.0 {
+                    let i = py as usize * self.stride + px as usize;
+                    self.pixels[i] = blend(scale(s, cover), self.pixels[i]);
+                }
+            }
+        }
+    }
+
     /// An anti-aliased rounded-rectangle outline, `t` pixels thick, drawn
     /// inside the rect (x, y, w, h).
     pub fn ring(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, t: i32, color: u32) {
