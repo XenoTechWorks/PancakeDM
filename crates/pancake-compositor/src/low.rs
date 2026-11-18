@@ -15,6 +15,16 @@ mod ffi {
     extern "C" {
         pub fn pancake_low_version() -> u32;
         pub fn pancake_low_open(path: *const c_char) -> *mut c_void;
+        pub fn pancake_low_open_fd(fd: c_int) -> *mut c_void;
+
+        pub fn pancake_seat_open() -> *mut c_void;
+        pub fn pancake_seat_name(seat: *mut c_void) -> *const c_char;
+        pub fn pancake_seat_fd(seat: *mut c_void) -> c_int;
+        pub fn pancake_seat_dispatch(seat: *mut c_void) -> c_int;
+        pub fn pancake_seat_ack_disable(seat: *mut c_void);
+        pub fn pancake_seat_switch(seat: *mut c_void, session: c_int) -> c_int;
+        pub fn pancake_seat_open_device(seat: *mut c_void, path: *const c_char) -> c_int;
+        pub fn pancake_seat_close(seat: *mut c_void);
         pub fn pancake_low_output_count(dev: *mut c_void) -> u32;
         pub fn pancake_low_output_info(dev: *mut c_void, index: u32, info: *mut OutputInfo) -> c_int;
         pub fn pancake_low_fill(dev: *mut c_void, index: u32, xrgb: u32) -> c_int;
@@ -28,7 +38,9 @@ mod ffi {
         pub fn pancake_vt_take() -> c_int;
         pub fn pancake_vt_release();
 
-        pub fn pancake_input_open(seat: *const c_char) -> *mut c_void;
+        pub fn pancake_input_open(seat: *mut c_void) -> *mut c_void;
+        pub fn pancake_input_suspend(input: *mut c_void);
+        pub fn pancake_input_resume(input: *mut c_void) -> c_int;
         pub fn pancake_input_fd(input: *mut c_void) -> c_int;
         pub fn pancake_input_next(input: *mut c_void, out: *mut InputEvent) -> c_int;
         pub fn pancake_input_close(input: *mut c_void);
@@ -89,6 +101,20 @@ impl Device {
         let raw = unsafe { ffi::pancake_low_open(ptr) };
         if raw.is_null() {
             return Err(format!("can't open {}", path.unwrap_or("/dev/dri/card0")));
+        }
+        Ok(Self { raw })
+    }
+
+    /// Open a GPU through the seat (no `video` group needed).
+    pub fn open_via(seat: &Seat, path: &str) -> Result<Self, String> {
+        let cpath = std::ffi::CString::new(path).map_err(|e| e.to_string())?;
+        let fd = unsafe { ffi::pancake_seat_open_device(seat.raw, cpath.as_ptr()) };
+        if fd < 0 {
+            return Err(format!("the seat wouldn't give us {path}"));
+        }
+        let raw = unsafe { ffi::pancake_low_open_fd(fd) };
+        if raw.is_null() {
+            return Err(format!("can't set up {path}"));
         }
         Ok(Self { raw })
     }
@@ -160,6 +186,9 @@ impl Device {
     pub fn open(_path: Option<&str>) -> Result<Self, String> {
         Err("built without the Zig low-level layer (use `make`)".into())
     }
+    pub fn open_via(_seat: &Seat, _path: &str) -> Result<Self, String> {
+        Err("built without the Zig low-level layer (use `make`)".into())
+    }
     pub fn outputs(&self) -> Vec<Output> {
         Vec::new()
     }
@@ -182,6 +211,20 @@ impl Device {
 pub mod key {
     pub const ESC: u32 = 1;
     pub const SPACE: u32 = 57;
+    pub const LEFTCTRL: u32 = 29;
+    pub const RIGHTCTRL: u32 = 97;
+    pub const LEFTALT: u32 = 56;
+    pub const RIGHTALT: u32 = 100;
+
+    /// F1..F12 -> 1..12.
+    pub fn function_number(code: u32) -> Option<i32> {
+        match code {
+            59..=68 => Some(code as i32 - 58),
+            87 => Some(11),
+            88 => Some(12),
+            _ => None,
+        }
+    }
 }
 
 #[cfg_attr(not(feature = "zig-backend"), allow(dead_code))]
@@ -205,18 +248,35 @@ pub struct Input {
 
 #[cfg(feature = "zig-backend")]
 impl Input {
-    pub fn open() -> Result<Self, String> {
-        let raw = unsafe { ffi::pancake_input_open(std::ptr::null()) };
+    /// Through the seat if there is one, otherwise directly.
+    pub fn open(seat: Option<&Seat>) -> Result<Self, String> {
+        let raw = unsafe { ffi::pancake_input_open(seat.map_or(std::ptr::null_mut(), |s| s.raw)) };
         if raw.is_null() {
-            return Err("can't start input (are you in the `input` group?)".into());
+            return Err(match seat {
+                Some(_) => "can't start input through the seat".into(),
+                None => "can't start input (are you in the `input` group?)".into(),
+            });
         }
         Ok(Self { raw })
     }
 
+    pub fn fd(&self) -> i32 {
+        unsafe { ffi::pancake_input_fd(self.raw) }
+    }
+
     /// Wait up to `timeout_ms` for input; true if some arrived.
     pub fn wait(&self, timeout_ms: i32) -> bool {
-        let mut pfd = ffi::PollFd { fd: unsafe { ffi::pancake_input_fd(self.raw) }, events: 1, revents: 0 };
-        unsafe { ffi::poll(&mut pfd, 1, timeout_ms) > 0 }
+        wait(&[self.fd()], timeout_ms)[0]
+    }
+
+    /// Let go of input devices (the seat was disabled).
+    pub fn suspend(&self) {
+        unsafe { ffi::pancake_input_suspend(self.raw) }
+    }
+
+    /// Take input devices back (the seat was enabled again).
+    pub fn resume(&self) {
+        unsafe { ffi::pancake_input_resume(self.raw) };
     }
 
     pub fn next(&self) -> Option<InputEvent> {
@@ -250,12 +310,17 @@ impl Drop for Input {
 
 #[cfg(not(feature = "zig-backend"))]
 impl Input {
-    pub fn open() -> Result<Self, String> {
+    pub fn open(_seat: Option<&Seat>) -> Result<Self, String> {
         Err("built without the Zig low-level layer (use `make`)".into())
+    }
+    pub fn fd(&self) -> i32 {
+        -1
     }
     pub fn wait(&self, _timeout_ms: i32) -> bool {
         false
     }
+    pub fn suspend(&self) {}
+    pub fn resume(&self) {}
     pub fn next(&self) -> Option<InputEvent> {
         None
     }
@@ -288,4 +353,102 @@ impl Drop for Vt {
             ffi::pancake_vt_release()
         }
     }
+}
+
+// ---- Waiting on several fds -------------------------------------------------
+
+/// Wait up to `timeout_ms` until any fd is readable; one bool per fd.
+#[cfg(feature = "zig-backend")]
+pub fn wait(fds: &[i32], timeout_ms: i32) -> Vec<bool> {
+    let mut pfds: Vec<ffi::PollFd> = fds.iter().map(|&fd| ffi::PollFd { fd, events: 1, revents: 0 }).collect();
+    if unsafe { ffi::poll(pfds.as_mut_ptr(), pfds.len() as u64, timeout_ms) } <= 0 {
+        return vec![false; fds.len()];
+    }
+    pfds.iter().map(|p| p.revents != 0).collect()
+}
+
+#[cfg(not(feature = "zig-backend"))]
+pub fn wait(fds: &[i32], timeout_ms: i32) -> Vec<bool> {
+    std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
+    vec![false; fds.len()]
+}
+
+// ---- Seat -------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SeatEvents {
+    /// The VT is ours again: take devices back and redraw everything.
+    pub enabled: bool,
+    /// Switched away: stop using devices, then call `ack_disable`.
+    pub disabled: bool,
+}
+
+/// Seat access through libseat (systemd-logind, elogind or seatd).
+/// Dropping it closes every device it opened.
+pub struct Seat {
+    #[cfg(feature = "zig-backend")]
+    raw: *mut std::ffi::c_void,
+}
+
+#[cfg(feature = "zig-backend")]
+impl Seat {
+    /// None when no seat backend is running.
+    pub fn open() -> Option<Self> {
+        let raw = unsafe { ffi::pancake_seat_open() };
+        (!raw.is_null()).then_some(Self { raw })
+    }
+
+    pub fn name(&self) -> String {
+        let p = unsafe { ffi::pancake_seat_name(self.raw) };
+        if p.is_null() {
+            return "?".into();
+        }
+        unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+
+    pub fn fd(&self) -> i32 {
+        unsafe { ffi::pancake_seat_fd(self.raw) }
+    }
+
+    pub fn dispatch(&self) -> SeatEvents {
+        let r = unsafe { ffi::pancake_seat_dispatch(self.raw) };
+        if r < 0 {
+            return SeatEvents::default();
+        }
+        SeatEvents { enabled: r & 1 != 0, disabled: r & 2 != 0 }
+    }
+
+    pub fn ack_disable(&self) {
+        unsafe { ffi::pancake_seat_ack_disable(self.raw) }
+    }
+
+    /// Switch to VT/session `n` (Ctrl+Alt+F<n>).
+    pub fn switch_to(&self, n: i32) {
+        unsafe { ffi::pancake_seat_switch(self.raw, n) };
+    }
+}
+
+#[cfg(feature = "zig-backend")]
+impl Drop for Seat {
+    fn drop(&mut self) {
+        unsafe { ffi::pancake_seat_close(self.raw) }
+    }
+}
+
+#[cfg(not(feature = "zig-backend"))]
+impl Seat {
+    pub fn open() -> Option<Self> {
+        None
+    }
+    pub fn name(&self) -> String {
+        String::new()
+    }
+    pub fn fd(&self) -> i32 {
+        -1
+    }
+    pub fn dispatch(&self) -> SeatEvents {
+        SeatEvents::default()
+    }
+    pub fn ack_disable(&self) {}
+    pub fn switch_to(&self, _n: i32) {}
 }

@@ -1,9 +1,10 @@
 //! Keyboard, mouse and touchpad input through libinput + udev.
-//! Devices are opened directly for now (user must be in the `input` group);
-//! seat handling via logind/seatd comes later.
+//! Devices are opened through the seat when there is one; otherwise
+//! directly (then the user must be in the `input` group).
 
 const std = @import("std");
 const builtin = @import("builtin");
+const seat = @import("seat.zig");
 const c = @cImport({
     @cInclude("libinput.h");
     @cInclude("libudev.h");
@@ -42,12 +43,14 @@ const Input = struct {
     li: *c.struct_libinput,
 };
 
-fn openRestricted(path: [*c]const u8, flags: c_int, _: ?*anyopaque) callconv(cc) c_int {
+fn openRestricted(path: [*c]const u8, flags: c_int, data: ?*anyopaque) callconv(cc) c_int {
+    if (data != null) return seat.of(data).openDevice(path);
     const fd = c.open(path, flags | c.O_CLOEXEC);
     return if (fd < 0) -1 else fd;
 }
 
-fn closeRestricted(fd: c_int, _: ?*anyopaque) callconv(cc) void {
+fn closeRestricted(fd: c_int, data: ?*anyopaque) callconv(cc) void {
+    if (data != null) return seat.of(data).closeDevice(fd);
     _ = c.close(fd);
 }
 
@@ -60,14 +63,16 @@ fn in_of(p: ?*anyopaque) *Input {
     return @ptrCast(@alignCast(p.?));
 }
 
-/// Start reading input from every device on a seat (NULL = "seat0").
-export fn pancake_input_open(seat: ?[*:0]const u8) ?*anyopaque {
+/// Start reading input from every device on the seat. `seat_handle` is from
+/// pancake_seat_open, or NULL to open devices directly on "seat0".
+export fn pancake_input_open(seat_handle: ?*anyopaque) ?*anyopaque {
     const udev = c.udev_new() orelse return null;
-    const li = c.libinput_udev_create_context(&interface, null, udev) orelse {
+    const li = c.libinput_udev_create_context(&interface, seat_handle, udev) orelse {
         _ = c.udev_unref(udev);
         return null;
     };
-    if (c.libinput_udev_assign_seat(li, seat orelse "seat0") != 0) {
+    const seat_name: [*c]const u8 = if (seat_handle != null) seat.of(seat_handle).name() else "seat0";
+    if (c.libinput_udev_assign_seat(li, seat_name) != 0) {
         _ = c.libinput_unref(li);
         _ = c.udev_unref(udev);
         return null;
@@ -91,6 +96,16 @@ export fn pancake_input_next(handle: ?*anyopaque, out: *Event) c_int {
         if (translate(ev, out)) return 1;
     }
     return 0;
+}
+
+/// Release all input devices (the seat was disabled: VT switched away).
+export fn pancake_input_suspend(handle: ?*anyopaque) void {
+    c.libinput_suspend(in_of(handle).li);
+}
+
+/// Reopen input devices after the seat comes back.
+export fn pancake_input_resume(handle: ?*anyopaque) c_int {
+    return c.libinput_resume(in_of(handle).li);
 }
 
 export fn pancake_input_close(handle: ?*anyopaque) void {

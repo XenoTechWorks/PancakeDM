@@ -6,6 +6,7 @@ const std = @import("std");
 comptime {
     _ = @import("input.zig");
     _ = @import("vt.zig");
+    _ = @import("seat.zig");
 }
 const c = @cImport({
     @cInclude("xf86drm.h");
@@ -56,6 +57,8 @@ const CursorBuf = struct {
 
 const Device = struct {
     fd: c_int,
+    /// False when the fd came from the seat (it closes it, and handles DRM master).
+    owns_fd: bool = true,
     outputs: [max_outputs]Output = undefined,
     count: usize = 0,
     /// Hardware cursor size (DRM_CAP_CURSOR_WIDTH/HEIGHT, usually 64x64).
@@ -75,18 +78,28 @@ fn dev_of(p: ?*anyopaque) *Device {
     return @ptrCast(@alignCast(p.?));
 }
 
-/// Open a DRM device (NULL = /dev/dri/card0) and find connected outputs.
+/// Open a DRM device (NULL = /dev/dri/card0) directly, without a seat.
 export fn pancake_low_open(path: ?[*:0]const u8) ?*anyopaque {
     const p: [*:0]const u8 = path orelse "/dev/dri/card0";
     const fd = c.open(p, c.O_RDWR | c.O_CLOEXEC);
     if (fd < 0) return null;
-    const dev = std.heap.c_allocator.create(Device) catch {
+    // Fails if another compositor holds the GPU; probing still works then.
+    _ = c.drmSetMaster(fd);
+    return setup(fd, true) orelse {
         _ = c.close(fd);
         return null;
     };
-    dev.* = .{ .fd = fd };
-    // Fails if another compositor holds the GPU; probing still works then.
-    _ = c.drmSetMaster(fd);
+}
+
+/// Use a DRM fd opened by the seat (pancake_seat_open_device). The seat
+/// keeps ownership of the fd and of DRM master.
+export fn pancake_low_open_fd(fd: c_int) ?*anyopaque {
+    return setup(fd, false);
+}
+
+fn setup(fd: c_int, owns_fd: bool) ?*anyopaque {
+    const dev = std.heap.c_allocator.create(Device) catch return null;
+    dev.* = .{ .fd = fd, .owns_fd = owns_fd };
     probe(dev);
     var cap: u64 = 0;
     if (c.drmGetCap(fd, c.DRM_CAP_CURSOR_WIDTH, &cap) == 0 and cap > 0) dev.cursor_w = @intCast(cap);
@@ -160,8 +173,10 @@ export fn pancake_low_close(handle: ?*anyopaque) void {
         if (out.fb_id != 0) _ = c.drmModeRmFB(dev.fd, out.fb_id);
         if (out.handle != 0) _ = c.drmModeDestroyDumbBuffer(dev.fd, out.handle);
     }
-    _ = c.drmDropMaster(dev.fd);
-    _ = c.close(dev.fd);
+    if (dev.owns_fd) {
+        _ = c.drmDropMaster(dev.fd);
+        _ = c.close(dev.fd);
+    }
     std.heap.c_allocator.destroy(dev);
 }
 

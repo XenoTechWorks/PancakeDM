@@ -34,12 +34,20 @@ when it's available and seatd otherwise.
 ## Dependencies
 
 Build: Rust (cargo), Zig 0.13 or newer, make.
-Libraries (with headers): libdrm, libinput, libudev. On KISS or other
-systems without systemd, eudev or libudev-zero provide libudev.
+Libraries (with headers): libdrm, libinput, libudev, libseat. On KISS or
+other systems without systemd, eudev or libudev-zero provide libudev.
 
-For now the compositor opens input devices directly, so your user needs
-to be in the `input` group (and in `video` for the GPU). Seat handling
-through logind or seatd will replace that.
+## Seats
+
+The compositor gets the GPU and input devices through libseat, which
+talks to whatever the system runs: systemd-logind, elogind or seatd.
+That means no `video`/`input` group membership is needed, and VT
+switching (Ctrl+Alt+F1..F12) works: when you switch away the compositor
+lets go of its devices, and when you come back it redraws everything.
+
+If no seat backend is running, it falls back to opening devices
+directly (then the user needs the `video` and `input` groups) and takes
+over the VT itself. VT switching isn't available in that mode.
 
 ## Building
 

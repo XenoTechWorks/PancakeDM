@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
     lib.linkSystemLibrary("drm");
     lib.linkSystemLibrary("input");
     lib.linkSystemLibrary("udev");
+    lib.linkSystemLibrary("seat");
     // Rust links without unwinding/sanitizer runtimes from Zig.
     lib.bundle_compiler_rt = true;
     b.installArtifact(lib);

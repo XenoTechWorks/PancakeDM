@@ -1,5 +1,5 @@
 //! PancakeDM compositor. Window management and policy are written in Rust;
-//! the low-level layer (DRM/KMS, input, buffers) is Zig, under `lowlevel/`.
+//! the low-level layer (DRM/KMS, input, buffers, seat) is Zig, under `lowlevel/`.
 
 mod cursor;
 mod low;
@@ -14,7 +14,8 @@ usage: pancake-compositor [options]
   --list             list connected screens and exit
   --input            print keyboard/mouse events (Esc quits)
   --fill RRGGBB      fill every screen with a color and show the cursor
-                     (run from a TTY); Space cycles colors, Esc quits
+                     (run from a TTY); Space cycles colors, Esc quits,
+                     Ctrl+Alt+F1..F12 switches VT
   --seconds N        stop after N seconds (default 60, 0 = no limit)
   --device PATH      DRM device (default /dev/dri/card0)
   --version          print versions and exit";
@@ -52,101 +53,181 @@ fn main() -> ExitCode {
     }
     let deadline = (seconds > 0).then(|| Instant::now() + Duration::from_secs(seconds));
 
-    if input && fill.is_none() {
-        return match run_input(deadline) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&e),
-        };
-    }
-    if !list && fill.is_none() {
+    let result = if let Some(color) = fill {
+        run_fill(device.as_deref(), color, deadline)
+    } else if input {
+        run_input(deadline)
+    } else if list {
+        run_list(device.as_deref())
+    } else {
         println!("{USAGE}");
-        return ExitCode::SUCCESS;
-    }
-
-    // Declared before `dev`, so it's dropped after it: screens are restored
-    // first, then the TTY gets its text back.
-    let _vt = if fill.is_some() { low::Vt::take() } else { None };
-    let dev = match low::Device::open(device.as_deref()) {
-        Ok(d) => d,
-        Err(e) => return fail(&e),
+        Ok(())
     };
-    let outputs = dev.outputs();
-    if outputs.is_empty() {
-        return fail("no connected screens found");
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(&e),
     }
+}
+
+fn print_outputs(outputs: &[low::Output]) {
     for (i, o) in outputs.iter().enumerate() {
         println!(
             "{i}: {} {}x{} @ {}.{:03} Hz",
             o.name, o.width, o.height, o.refresh_mhz / 1000, o.refresh_mhz % 1000
         );
     }
-
-    if let Some(color) = fill {
-        if let Err(e) = run_fill(&dev, &outputs, color, deadline) {
-            return fail(&e);
-        }
-        // Dropping `dev` puts the old screen contents back.
-    }
-    ExitCode::SUCCESS
 }
 
-fn run_fill(dev: &low::Device, outputs: &[low::Output], color: u32, deadline: Option<Instant>) -> Result<(), String> {
-    let count = outputs.len() as u32;
-    let paint = |c: u32| (0..count).try_for_each(|i| dev.fill(i, c));
-    paint(color)?;
+fn run_list(device: Option<&str>) -> Result<(), String> {
+    let dev = low::Device::open(device)?;
+    let outputs = dev.outputs();
+    if outputs.is_empty() {
+        return Err("no connected screens found".into());
+    }
+    print_outputs(&outputs);
+    Ok(())
+}
+
+/// Ctrl and Alt state, for Ctrl+Alt+F<n>.
+#[derive(Default)]
+struct Mods {
+    ctrl_l: bool,
+    ctrl_r: bool,
+    alt_l: bool,
+    alt_r: bool,
+}
+
+impl Mods {
+    fn update(&mut self, code: u32, pressed: bool) {
+        match code {
+            key::LEFTCTRL => self.ctrl_l = pressed,
+            key::RIGHTCTRL => self.ctrl_r = pressed,
+            key::LEFTALT => self.alt_l = pressed,
+            key::RIGHTALT => self.alt_r = pressed,
+            _ => {}
+        }
+    }
+
+    fn ctrl_alt(&self) -> bool {
+        (self.ctrl_l || self.ctrl_r) && (self.alt_l || self.alt_r)
+    }
+}
+
+fn run_fill(device: Option<&str>, mut color: u32, deadline: Option<Instant>) -> Result<(), String> {
+    // Drop order is the reverse of this: input and screens are released
+    // first, then the VT, then the seat.
+    let seat = low::Seat::open();
+    let _vt = if seat.is_none() { low::Vt::take() } else { None };
+    let path = device.unwrap_or("/dev/dri/card0");
+    let dev = match &seat {
+        Some(s) => {
+            eprintln!("pancake-compositor: using seat {}", s.name());
+            low::Device::open_via(s, path)?
+        }
+        None => {
+            eprintln!("pancake-compositor: no seat backend (logind/elogind/seatd); opening devices directly");
+            low::Device::open(Some(path))?
+        }
+    };
+    let outputs = dev.outputs();
+    if outputs.is_empty() {
+        return Err("no connected screens found".into());
+    }
+    print_outputs(&outputs);
+    let input = low::Input::open(seat.as_ref())?;
 
     // The cursor lives on screen 0 for now; multi-screen layout comes later.
     let main = &outputs[0];
     let img = CursorImage::placeholder_for(main.height, dev.cursor_size());
     let mut pointer = Pointer::new(main.width, main.height);
-    let has_cursor = match dev.set_cursor(0, &img) {
-        Ok(()) => true,
-        Err(e) => {
-            eprintln!("pancake-compositor: {e}; running without a cursor");
-            false
+    let count = outputs.len() as u32;
+
+    // Puts everything on screen. Called at start and whenever the VT comes back,
+    // because another session may have changed the screens meanwhile.
+    let redraw = |color: u32, pointer: &Pointer| -> Result<bool, String> {
+        (0..count).try_for_each(|i| dev.fill(i, color))?;
+        for i in 1..count {
+            dev.hide_cursor(i);
+        }
+        match dev.set_cursor(0, &img) {
+            Ok(()) => {
+                let (x, y) = pointer.pixel();
+                dev.move_cursor(0, x, y);
+                Ok(true)
+            }
+            Err(e) => {
+                eprintln!("pancake-compositor: {e}; running without a cursor");
+                Ok(false)
+            }
         }
     };
-    for i in 1..count {
-        dev.hide_cursor(i);
-    }
-    let place = |p: &Pointer| {
-        let (x, y) = p.pixel();
-        dev.move_cursor(0, x, y);
-    };
-    if has_cursor {
-        place(&pointer);
-    }
+    let mut has_cursor = redraw(color, &pointer)?;
 
-    let input = low::Input::open()?;
     // Start after the current color, so the first Space always changes it.
     let mut next = PALETTE.iter().position(|&c| c == color).map_or(0, |i| (i + 1) % PALETTE.len());
+    let mut mods = Mods::default();
+    let mut active = true;
+
     while !expired(deadline) {
-        if !input.wait(100) {
+        let mut fds = vec![input.fd()];
+        if let Some(s) = &seat {
+            fds.push(s.fd());
+        }
+        let ready = low::wait(&fds, 100);
+
+        if let (Some(s), Some(true)) = (&seat, ready.get(1)) {
+            let ev = s.dispatch();
+            if ev.disabled {
+                // Switched away: let go of everything, then tell the seat.
+                active = false;
+                input.suspend();
+                mods = Mods::default();
+                s.ack_disable();
+            }
+            if ev.enabled {
+                active = true;
+                input.resume();
+                has_cursor = redraw(color, &pointer)?;
+            }
+        }
+        if !active || !ready[0] {
             continue;
         }
+
         let before = pointer;
         while let Some(ev) = input.next() {
             match ev {
+                InputEvent::Key { code, pressed } => {
+                    mods.update(code, pressed);
+                    if !pressed {
+                        continue;
+                    }
+                    if let (true, Some(n), Some(s)) = (mods.ctrl_alt(), key::function_number(code), &seat) {
+                        s.switch_to(n);
+                    } else if code == key::ESC {
+                        return Ok(());
+                    } else if code == key::SPACE {
+                        color = PALETTE[next];
+                        next = (next + 1) % PALETTE.len();
+                        (0..count).try_for_each(|i| dev.fill(i, color))?;
+                    }
+                }
                 InputEvent::Motion { dx, dy } => pointer.move_by(dx, dy),
                 InputEvent::MotionAbsolute { x, y } => pointer.move_to_fraction(x, y),
-                InputEvent::Key { code: key::ESC, pressed: true } => return Ok(()),
-                InputEvent::Key { code: key::SPACE, pressed: true } => {
-                    paint(PALETTE[next])?;
-                    next = (next + 1) % PALETTE.len();
-                }
                 _ => {}
             }
         }
         // One move per batch of events, and only when it actually changed.
         if has_cursor && pointer.pixel() != before.pixel() {
-            place(&pointer);
+            let (x, y) = pointer.pixel();
+            dev.move_cursor(0, x, y);
         }
     }
     Ok(())
 }
 
 fn run_input(deadline: Option<Instant>) -> Result<(), String> {
-    let input = low::Input::open()?;
+    let input = low::Input::open(None)?;
     while !expired(deadline) {
         if !input.wait(100) {
             continue;
@@ -168,4 +249,29 @@ fn expired(deadline: Option<Instant>) -> bool {
 fn fail(msg: &str) -> ExitCode {
     eprintln!("pancake-compositor: {msg}");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_alt_needs_both() {
+        let mut m = Mods::default();
+        m.update(key::LEFTCTRL, true);
+        assert!(!m.ctrl_alt());
+        m.update(key::RIGHTALT, true);
+        assert!(m.ctrl_alt());
+        m.update(key::LEFTCTRL, false);
+        assert!(!m.ctrl_alt());
+    }
+
+    #[test]
+    fn function_keys_map_to_vt_numbers() {
+        assert_eq!(key::function_number(59), Some(1));
+        assert_eq!(key::function_number(68), Some(10));
+        assert_eq!(key::function_number(87), Some(11));
+        assert_eq!(key::function_number(88), Some(12));
+        assert_eq!(key::function_number(key::ESC), None);
+    }
 }

@@ -6,6 +6,7 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=drm");
         println!("cargo:rustc-link-lib=dylib=input");
         println!("cargo:rustc-link-lib=dylib=udev");
+        println!("cargo:rustc-link-lib=dylib=seat");
         println!("cargo:rerun-if-changed=../../lowlevel/src");
     }
 }
