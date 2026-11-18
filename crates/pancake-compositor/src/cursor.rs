@@ -14,57 +14,29 @@ pub struct CursorImage {
     pub pixels: Vec<u32>,
 }
 
-/// Built-in arrow until cursor themes are loaded. `#` = outline, `.` = fill.
-const ARROW: [&str; 19] = [
-    "#           ",
-    "##          ",
-    "#.#         ",
-    "#..#        ",
-    "#...#       ",
-    "#....#      ",
-    "#.....#     ",
-    "#......#    ",
-    "#.......#   ",
-    "#........#  ",
-    "#.........# ",
-    "#......#####",
-    "#...#..#    ",
-    "#..# #..#   ",
-    "#.#  #..#   ",
-    "##    #..#  ",
-    "#     #..#  ",
-    "       #..# ",
-    "       ###  ",
-];
-
-const OUTLINE: u32 = 0xff20_1a17; // near-black, warm
-const FILL: u32 = 0xffff_ffff;
+/// Placeholder cursor until real cursor icons exist: a solid black box.
+const BOX_SIZE: u32 = 16;
+const BOX_COLOR: u32 = 0xff00_0000; // opaque black (premultiplied)
 
 impl CursorImage {
-    /// The built-in arrow, scaled by an integer factor (1 = 12x19).
-    pub fn arrow(scale: u32) -> Self {
-        let scale = scale.max(1);
-        let (bw, bh) = (ARROW[0].len() as u32, ARROW.len() as u32);
-        let (width, height) = (bw * scale, bh * scale);
-        let mut pixels = vec![0u32; (width * height) as usize];
-        for y in 0..height {
-            let row = ARROW[(y / scale) as usize].as_bytes();
-            for x in 0..width {
-                pixels[(y * width + x) as usize] = match row[(x / scale) as usize] {
-                    b'#' => OUTLINE,
-                    b'.' => FILL,
-                    _ => 0, // fully transparent
-                };
-            }
+    /// The placeholder box, scaled by an integer factor (1 = 16x16).
+    /// The hotspot is the top-left corner.
+    pub fn placeholder(scale: u32) -> Self {
+        let size = BOX_SIZE * scale.max(1);
+        Self {
+            width: size,
+            height: size,
+            hot_x: 0,
+            hot_y: 0,
+            pixels: vec![BOX_COLOR; (size * size) as usize],
         }
-        Self { width, height, hot_x: 0, hot_y: 0, pixels }
     }
 
-    /// Largest integer scale that still fits the GPU's cursor plane.
-    pub fn arrow_for(screen_height: u32, plane: (u32, u32)) -> Self {
+    /// Placeholder sized for the screen, never bigger than the cursor plane.
+    pub fn placeholder_for(screen_height: u32, plane: (u32, u32)) -> Self {
         let wanted = (screen_height / 1080).max(1);
-        let fits = (plane.0 / ARROW[0].len() as u32).min(plane.1 / ARROW.len() as u32).max(1);
-        Self::arrow(wanted.min(fits))
+        let fits = (plane.0.min(plane.1) / BOX_SIZE).max(1);
+        Self::placeholder(wanted.min(fits))
     }
 }
 
@@ -106,23 +78,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arrow_is_premultiplied_and_transparent_outside() {
-        let img = CursorImage::arrow(1);
-        assert_eq!((img.width, img.height), (12, 19));
-        assert_eq!(img.pixels.len(), 12 * 19);
-        // Top-right corner is outside the arrow: fully transparent, no junk.
-        assert_eq!(img.pixels[11], 0);
-        // Premultiplied: any pixel with zero alpha must be all zero.
-        assert!(img.pixels.iter().all(|&p| p >> 24 != 0 || p == 0));
+    fn placeholder_is_a_solid_black_box() {
+        let img = CursorImage::placeholder(1);
+        assert_eq!((img.width, img.height), (16, 16));
+        assert_eq!(img.pixels.len(), 16 * 16);
+        assert!(img.pixels.iter().all(|&p| p == 0xff00_0000));
     }
 
     #[test]
-    fn arrow_scales_and_fits_the_plane() {
-        assert_eq!(CursorImage::arrow(2).width, 24);
-        let img = CursorImage::arrow_for(4320, (64, 64)); // 8K wants 4x, plane fits 3x
-        assert!(img.width <= 64 && img.height <= 64);
-        assert_eq!(img.height, 19 * 3);
-        assert_eq!(CursorImage::arrow_for(1440, (64, 64)).width, 12);
+    fn placeholder_scales_and_fits_the_plane() {
+        assert_eq!(CursorImage::placeholder(2).width, 32);
+        assert_eq!(CursorImage::placeholder_for(1440, (64, 64)).width, 16);
+        assert_eq!(CursorImage::placeholder_for(2160, (64, 64)).width, 32);
+        let img = CursorImage::placeholder_for(8640, (64, 64)); // wants 8x, plane fits 4x
+        assert_eq!(img.width, 64);
     }
 
     #[test]

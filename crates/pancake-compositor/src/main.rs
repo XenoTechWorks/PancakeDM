@@ -97,7 +97,7 @@ fn run_fill(dev: &low::Device, outputs: &[low::Output], color: u32, deadline: Op
 
     // The cursor lives on screen 0 for now; multi-screen layout comes later.
     let main = &outputs[0];
-    let img = CursorImage::arrow_for(main.height, dev.cursor_size());
+    let img = CursorImage::placeholder_for(main.height, dev.cursor_size());
     let mut pointer = Pointer::new(main.width, main.height);
     let has_cursor = match dev.set_cursor(0, &img) {
         Ok(()) => true,
