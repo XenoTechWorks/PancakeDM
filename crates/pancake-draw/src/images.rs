@@ -114,6 +114,27 @@ pub fn wallpaper(img: &Image, w: u32, h: u32, fit: Fit, background: u32) -> Vec<
     out
 }
 
+/// A soft, darkened backdrop from an image (album art behind a card):
+/// cover-fit into `w` x `h`, blurred by shrinking a lot and scaling back
+/// up smoothly, then dimmed by `dim` (0..1, how much to darken).
+pub fn blurred_backdrop(img: &Image, w: u32, h: u32, dim: f32) -> Image {
+    let tiny = (w / 14).max(2);
+    let tiny_h = (h / 14).max(2);
+    let small = wallpaper(img, tiny, tiny_h, Fit::Fill, 0);
+    let rgba: Vec<u8> = small.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, 255]).collect();
+    let buf = image::RgbaImage::from_raw(tiny, tiny_h, rgba).unwrap();
+    let big = image::imageops::resize(&buf, w.max(1), h.max(1), image::imageops::FilterType::CatmullRom);
+    let keep = 1.0 - dim.clamp(0.0, 1.0);
+    let px = big
+        .pixels()
+        .map(|p| {
+            let c = |v: u8| ((v as f32 * keep) as u32).min(255);
+            0xff00_0000 | (c(p[0]) << 16) | (c(p[1]) << 8) | c(p[2])
+        })
+        .collect();
+    Image { w, h, px }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

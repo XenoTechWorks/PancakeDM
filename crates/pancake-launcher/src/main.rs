@@ -173,7 +173,14 @@ fn run() -> Result<(), String> {
         conn.flush().map_err(|e| e.to_string())?;
         if let Some(guard) = queue.prepare_read() {
             if pancake_draw::wait_readable(fd, 1000) {
-                guard.read().map_err(|e| e.to_string())?;
+                // "Would block" just means nothing arrived after all; only
+                // real errors end the program.
+                if let Err(e) = guard.read() {
+                    let would_block = matches!(&e, wayland_client::backend::WaylandError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock);
+                    if !would_block {
+                        return Err(e.to_string());
+                    }
+                }
             }
         }
         queue.dispatch_pending(&mut st).map_err(|e| e.to_string())?;

@@ -134,6 +134,66 @@ impl Popup {
     }
 }
 
+/// The bar ducks out of the way while the display changes (scale, size):
+/// it slides away, waits until changes have stopped for a moment, then
+/// slides back in at the new size. Hides the reshuffle and any flicker.
+#[derive(Default)]
+struct Reveal {
+    last_change: Option<Instant>,
+    hide_started: Option<Instant>,
+    show_started: Option<Instant>,
+}
+
+const HIDE_MS: f32 = 200.0;
+const SHOW_MS: f32 = 260.0;
+const SETTLE: Duration = Duration::from_millis(1500);
+
+/// Close a card right away (no fade): its size and scale are stale.
+fn drop_popup(popup: &mut Option<Popup>, app: &mut App) {
+    if let Some(p) = popup.take() {
+        p.layer.destroy();
+        p.surface.destroy();
+        app.surface_ids[POPUP] = None;
+    }
+}
+
+impl Reveal {
+    fn changed(&mut self) {
+        let now = Instant::now();
+        self.last_change = Some(now);
+        if self.hide_started.is_none() || self.show_started.is_some() {
+            self.hide_started = Some(now);
+            self.show_started = None;
+        }
+    }
+
+    /// Start coming back once things have been quiet long enough.
+    fn tick(&mut self) {
+        if let (Some(_), None, Some(c)) = (self.hide_started, self.show_started, self.last_change) {
+            if c.elapsed() >= SETTLE {
+                self.show_started = Some(Instant::now());
+            }
+        }
+        if self.show_started.is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 >= SHOW_MS) {
+            *self = Self::default();
+        }
+    }
+
+    /// 1 = fully shown, 0 = hidden.
+    fn visibility(&self) -> f32 {
+        let ease = |t: f32| 1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3);
+        match (self.hide_started, self.show_started) {
+            (_, Some(s)) => ease(s.elapsed().as_secs_f32() * 1000.0 / SHOW_MS),
+            (Some(h), None) => 1.0 - ease(h.elapsed().as_secs_f32() * 1000.0 / HIDE_MS),
+            _ => 1.0,
+        }
+    }
+
+    fn animating(&self) -> bool {
+        self.hide_started.is_some()
+    }
+}
+
 fn place(layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, pos: PanelPosition) {
     use zwlr_layer_surface_v1::Anchor;
     match pos {
@@ -214,6 +274,8 @@ fn run() -> Result<(), String> {
     };
     let mut bufs: Vec<(wl_buffer::WlBuffer, MmapMut, (u32, u32))> = Vec::new();
     let mut popup: Option<Popup> = None;
+    let mut reveal = Reveal::default();
+    let mut last_width = 0u32;
     let mut status = pancake_ipc::Status::default();
     let mut hits: Vec<(Rect, Target)> = Vec::new();
     let mut last_poll = Instant::now() - Duration::from_secs(10);
@@ -325,6 +387,8 @@ fn run() -> Result<(), String> {
                 accent = pancake_draw::accent::effective(&new);
                 system.set_weather(new.weather, &new.weather_location);
                 if new.scale != scale {
+                    reveal.changed();
+                    drop_popup(&mut popup, &mut app);
                     scale = new.scale;
                     surface.set_buffer_scale(scale as i32);
                     for b in bufs.drain(..) {
@@ -339,6 +403,17 @@ fn run() -> Result<(), String> {
             sys.refresh();
             last_stats = Instant::now();
         }
+
+        // The display changed size: duck out until it settles.
+        if app.configured[BAR] && app.size[BAR].0 != last_width {
+            if last_width != 0 {
+                reveal.changed();
+                drop_popup(&mut popup, &mut app);
+            }
+            last_width = app.size[BAR].0;
+        }
+        reveal.tick();
+        let vis = reveal.visibility();
 
         // Bar: redraw only when something visible changed.
         let now = Local::now();
@@ -357,7 +432,7 @@ fn run() -> Result<(), String> {
             info.net,
             info.bluetooth,
             popup.as_ref().map(|p| (p.kind, p.closing.is_some())),
-        );
+        ) + &format!("{}", (vis * 60.0) as i32);
         if app.configured[BAR] && key != last_drawn {
             let (w, h) = app.size[BAR];
             let (pw, ph) = (w * scale, h * scale);
@@ -374,6 +449,24 @@ fn run() -> Result<(), String> {
                 let open = popup.as_ref().filter(|p| p.closing.is_none()).map(|p| p.kind);
                 let mut ui = Ui { c: &mut canvas, fonts: &mut fonts, icons: &mut icons, art: &mut art, apps: &apps, cfg: &cfg, accent, pointer: app.pointer.filter(|_| app.pointer_on == BAR) };
                 hits = ui.draw_bar(&status, &sys, &info, open);
+                if vis < 1.0 {
+                    // Slide toward the screen edge and fade; no clicks meanwhile.
+                    hits.clear();
+                    let px = pancake_draw::pixels(&mut bufs[i].1);
+                    let (pw, ph) = (pw as usize, ph as usize);
+                    let dy = (((1.0 - vis) * (h as f32 + MARGIN as f32)) * scale as f32) as usize;
+                    let top = cfg.panel_position == PanelPosition::Top;
+                    for y in 0..ph {
+                        let row = if top { y } else { ph - 1 - y };
+                        let src = if top { y + dy } else { (ph - 1 - y).wrapping_sub(dy) };
+                        if src < ph {
+                            px.copy_within(src * pw..src * pw + pw, row * pw);
+                        } else {
+                            px[row * pw..row * pw + pw].fill(0);
+                        }
+                    }
+                    Canvas::new(px, w as i32, h as i32, scale as f32).fade_all(vis);
+                }
                 surface.attach(Some(&bufs[i].0), 0, 0);
                 surface.damage_buffer(0, 0, pw as i32, ph as i32);
                 surface.commit();
@@ -419,14 +512,18 @@ fn run() -> Result<(), String> {
         }
 
         conn.flush().map_err(|e| e.to_string())?;
-        // The dashboard's vinyl spins while music plays.
-        let spinning = popup.as_ref().is_some_and(|p| p.kind == PopupKind::Dashboard && p.closing.is_none())
-            && info.media.as_ref().is_some_and(|m| m.playing);
-        let fast = popup.as_ref().is_some_and(|p| p.animating() || p.drag.is_some()) || spinning;
+        let fast = popup.as_ref().is_some_and(|p| p.animating() || p.drag.is_some()) || reveal.animating();
         let timeout = if fast { 16 } else if popup.is_some() { 120 } else { 250 };
         if let Some(guard) = queue.prepare_read() {
             if pancake_draw::wait_readable(fd, timeout) {
-                guard.read().map_err(|e| e.to_string())?;
+                // "Would block" just means nothing arrived after all; only
+                // real errors end the program.
+                if let Err(e) = guard.read() {
+                    let would_block = matches!(&e, wayland_client::backend::WaylandError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock);
+                    if !would_block {
+                        return Err(e.to_string());
+                    }
+                }
             }
         }
         queue.dispatch_pending(&mut app).map_err(|e| e.to_string())?;
@@ -487,9 +584,10 @@ fn mmss(secs: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// Album art, cropped square and rounded, by (file, pixel size).
+/// Album art, cropped square and rounded, by (file, pixel size); and
+/// blurred backdrops of it, by (file, width, height).
 #[derive(Default)]
-struct ArtCache(HashMap<(PathBuf, u32), Option<Image>>);
+struct ArtCache(HashMap<(PathBuf, u32), Option<Image>>, HashMap<(PathBuf, u32, u32), Option<Image>>);
 
 impl ArtCache {
     fn get(&mut self, path: &PathBuf, size: u32, radius: f32) -> Option<&Image> {
@@ -499,6 +597,18 @@ impl ArtCache {
                 let img = images::load(path, None)?;
                 let px = images::wallpaper(&img, size, size, images::Fit::Fill, 0);
                 let mut out = Image { w: size, h: size, px };
+                round(&mut out, radius);
+                Some(out)
+            })
+            .as_ref()
+    }
+
+    fn backdrop(&mut self, path: &PathBuf, w: u32, h: u32, radius: f32) -> Option<&Image> {
+        self.1
+            .entry((path.clone(), w, h))
+            .or_insert_with(|| {
+                let img = images::load(path, None)?;
+                let mut out = images::blurred_backdrop(&img, w, h, 0.55);
                 round(&mut out, radius);
                 Some(out)
             })
@@ -1186,37 +1296,50 @@ impl Ui<'_, '_> {
             xd += wc + gap;
         }
 
-        // Media: a spinning record with the art in the middle.
+        // Media: the cover art, crisp, over a blurred and dimmed copy of
+        // itself filling the tile.
         let r = (xd, y0, wd, 298.0);
-        self.tile(r);
-        let (vx, vy) = (r.0 + wd / 2.0, r.1 + 92.0);
-        self.c.circle(vx, vy, 70.0, 0xff141110);
-        for k in 0..5 {
-            self.c.arc(vx, vy, 44.0 + k as f32 * 5.0, 1.0, 0.0, 360.0, 0x14ffffff); // grooves
+        let s = self.c.scale;
+        let backdrop = info.media.as_ref().and_then(|m| m.art.as_ref()).and_then(|p| self.art.backdrop(p, (wd * s) as u32, (298.0 * s) as u32, 16.0 * s)).cloned();
+        match backdrop {
+            Some(bg) => self.c.image(&bg, r.0 as i32, r.1 as i32),
+            None => self.tile(r),
         }
+        let vx = r.0 + wd / 2.0;
         match &info.media {
             Some(m) => {
-                // A sheen that turns while playing.
-                let turn = if m.playing { (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() % 4000) as f32 / 4000.0 * 360.0 } else { 30.0 };
-                self.c.arc(vx, vy, 58.0, 14.0, turn, 40.0, 0x1effffff);
-                self.c.arc(vx, vy, 58.0, 14.0, turn + 180.0, 40.0, 0x1effffff);
-                let art_px = (76.0 * self.c.scale) as u32;
-                let art = m.art.as_ref().and_then(|p| self.art.get(p, art_px, 38.0 * self.c.scale)).cloned();
+                let (ax, ay, asz) = (vx - 64.0, r.1 + 18.0, 128.0);
+                // A soft shadow under the cover.
+                self.c.rounded_rect(ax + 2.0, ay + 6.0, asz, asz, 14.0, 0x40000000);
+                self.c.rounded_rect(ax - 1.0, ay + 2.0, asz + 2.0, asz + 2.0, 15.0, 0x26000000);
+                let art_px = (asz * s) as u32;
+                let art = m.art.as_ref().and_then(|p| self.art.get(p, art_px, 14.0 * s)).cloned();
                 match art {
-                    Some(img) => self.c.image(&img, (vx - 38.0) as i32, (vy - 38.0) as i32),
+                    Some(img) => self.c.image(&img, ax as i32, ay as i32),
                     None => {
-                        self.c.circle(vx, vy, 38.0, accent);
-                        self.sym("audio-x-generic-symbolic", vx, vy, 30.0, on_accent);
+                        self.c.rounded_rect(ax, ay, asz, asz, 14.0, accent);
+                        self.sym("audio-x-generic-symbolic", vx, ay + asz / 2.0, 44.0, on_accent);
                     }
                 }
-                self.c.circle(vx, vy, 4.0, 0xff141110);
                 let title = self.fonts.fit(if m.title.is_empty() { "Unknown" } else { &m.title }, 14.0, true, wd - 24.0);
                 let tw = self.fonts.width(&title, 14.0, true);
-                self.c.text(self.fonts, &title, vx - tw / 2.0, r.1 + 194.0, 14.0, true, TEXT);
+                self.c.text(self.fonts, &title, vx - tw / 2.0, r.1 + 172.0, 14.0, true, TEXT);
                 let artist = self.fonts.fit(&m.artist, 12.0, false, wd - 24.0);
                 let aw = self.fonts.width(&artist, 12.0, false);
-                self.c.text(self.fonts, &artist, vx - aw / 2.0, r.1 + 213.0, 12.0, false, TEXT_DIM);
-                let row = r.1 + 252.0;
+                self.c.text(self.fonts, &artist, vx - aw / 2.0, r.1 + 190.0, 12.0, false, TEXT_DIM);
+                // Thin progress bar with times.
+                let pos = m.position_now();
+                let frac = if m.length > 0.0 { (pos / m.length) as f32 } else { 0.0 };
+                let (bx, bw, by) = (r.0 + 16.0, wd - 32.0, r.1 + 210.0);
+                self.c.rounded_rect(bx, by, bw, 3.0, 1.5, 0x33ffffff);
+                self.c.rounded_rect(bx, by, (bw * frac.clamp(0.0, 1.0)).max(3.0), 3.0, 1.5, 0xfff6eee3);
+                self.c.text(self.fonts, &mmss(pos), bx, by + 16.0, 10.0, true, TEXT_DIM);
+                if m.length > 0.0 {
+                    let l = mmss(m.length);
+                    let lw = self.fonts.width(&l, 10.0, true);
+                    self.c.text(self.fonts, &l, bx + bw - lw, by + 16.0, 10.0, true, TEXT_DIM);
+                }
+                let row = r.1 + 260.0;
                 for (dx, action, icon, big) in [
                     (-48.0, PAction::Previous, "media-skip-backward-symbolic", false),
                     (0.0, PAction::PlayPause, if m.playing { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" }, true),
@@ -1231,8 +1354,9 @@ impl Ui<'_, '_> {
                 }
             }
             None => {
-                self.c.circle(vx, vy, 38.0, 0x22ffffff);
-                self.sym("audio-x-generic-symbolic", vx, vy, 28.0, TEXT_FAINT);
+                let vy = r.1 + 110.0;
+                self.c.rounded_rect(vx - 48.0, vy - 48.0, 96.0, 96.0, 14.0, 0x1affffff);
+                self.sym("audio-x-generic-symbolic", vx, vy, 36.0, TEXT_FAINT);
                 let t = "Nothing playing";
                 let tw = self.fonts.width(t, 13.0, true);
                 self.c.text(self.fonts, t, vx - tw / 2.0, r.1 + 200.0, 13.0, true, TEXT_DIM);
