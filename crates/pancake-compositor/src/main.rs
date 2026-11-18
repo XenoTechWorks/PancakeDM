@@ -26,6 +26,7 @@ Click a window to focus it, Alt+drag moves it. Ctrl+Alt+Backspace quits,
 Ctrl+Alt+F1..F12 switches VT.
 
   --drm              use the real screens even inside a Wayland desktop
+  --no-panel         don't start pancake-panel
   --fill RRGGBB      background color (default f4a259)
   --anim             slide a bar across the background (shows any tearing)
   --seconds N        quit after N seconds (default: never)
@@ -34,7 +35,7 @@ Ctrl+Alt+F1..F12 switches VT.
   --device PATH      DRM device (default /dev/dri/card0)
   --version          print versions and exit
 
-msg commands (to a running compositor): screenshot PATH, windows, quit";
+msg commands (to a running compositor): screenshot PATH, windows, focus ID, quit";
 
 /// Default background: pancake gold.
 const DEFAULT_BACKGROUND: u32 = 0xf4a259;
@@ -52,13 +53,14 @@ fn main() -> ExitCode {
         };
     }
     let (mut list, mut input, mut fill, mut seconds, mut device) = (false, false, None, 0u64, None);
-    let (mut anim, mut force_drm) = (false, false);
+    let (mut anim, mut force_drm, mut panel) = (false, false, true);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--list" => list = true,
             "--input" => input = true,
             "--anim" => anim = true,
             "--drm" => force_drm = true,
+            "--no-panel" => panel = false,
             "--fill" => match args.next().and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok()) {
                 Some(c) => fill = Some(c),
                 None => return fail("--fill needs a color like f4a259"),
@@ -94,7 +96,7 @@ fn main() -> ExitCode {
         } else {
             backend::drm::DrmBackend::new(device.as_deref()).map(|b| Box::new(b) as Box<dyn Backend>)
         };
-        backend.and_then(|mut b| run_session(b.as_mut(), fill.unwrap_or(DEFAULT_BACKGROUND), anim, deadline))
+        backend.and_then(|mut b| run_session(b.as_mut(), fill.unwrap_or(DEFAULT_BACKGROUND), anim, panel, deadline))
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -159,7 +161,35 @@ fn min_gap(o: &low::Output) -> Duration {
     Duration::from_secs_f64(0.75 / hz)
 }
 
-fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, deadline: Option<Instant>) -> Result<(), String> {
+/// A shell program we started; stopped when the session ends.
+struct Child(std::process::Child);
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Start a shell program (e.g. pancake-panel) connected to this session.
+/// Looks next to our own binary first, then in PATH.
+fn spawn_shell_program(name: &str, wayland_display: &str, socket: &std::path::Path) -> Option<Child> {
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name))).filter(|p| p.exists());
+    let program = beside.unwrap_or_else(|| std::path::PathBuf::from(name));
+    match std::process::Command::new(&program)
+        .env("WAYLAND_DISPLAY", wayland_display)
+        .env("PANCAKE_SOCKET", socket)
+        .spawn()
+    {
+        Ok(c) => Some(Child(c)),
+        Err(e) => {
+            eprintln!("pancake-compositor: can't start {name}: {e}");
+            None
+        }
+    }
+}
+
+fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, deadline: Option<Instant>) -> Result<(), String> {
     let mut outputs = backend.outputs();
     print_outputs(&outputs);
     let count = outputs.len();
@@ -171,6 +201,7 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, deadline: Opti
     eprintln!("pancake-compositor: WAYLAND_DISPLAY={}", server.name);
     let ipc = ipc::Ipc::bind(&server.name)?;
     eprintln!("pancake-compositor: PANCAKE_SOCKET={}", ipc.path().display());
+    let _panel = if panel { spawn_shell_program("pancake-panel", &server.name, ipc.path()) } else { None };
 
     // The pointer lives on screen 0 for now; multi-screen layout comes later.
     let mut pointer = Pointer::new(outputs[0].width, outputs[0].height);
@@ -251,7 +282,18 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, deadline: Opti
                         screenshots.push((path, stream));
                         dirty[0] = true;
                     }
-                    ipc::Command::Windows => ipc::reply(stream, &format!("ok {}", wl.window_titles().join("|"))),
+                    ipc::Command::Windows => {
+                        let list: Vec<pancake_ipc::WindowInfo> = wl
+                            .window_list()
+                            .into_iter()
+                            .map(|(id, title, focused)| pancake_ipc::WindowInfo { id, title, focused })
+                            .collect();
+                        ipc::reply(stream, &format!("ok {}", pancake_ipc::encode_windows(&list)));
+                    }
+                    ipc::Command::Focus(id) => {
+                        let ok = wl.focus_window(id);
+                        ipc::reply(stream, if ok { "ok" } else { "error no such window" });
+                    }
                     ipc::Command::Quit => {
                         ipc::reply(stream, "ok");
                         return Ok(());

@@ -9,6 +9,7 @@
 //! (windows and popups).
 
 mod data;
+mod layer;
 mod seat;
 mod shm;
 mod subsurface;
@@ -16,6 +17,7 @@ mod xdg;
 
 use seat::{Grab, Keyboard};
 use shm::{BufferData, Pool};
+use layer::Layer;
 use subsurface::Sub;
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
@@ -60,6 +62,7 @@ impl Server {
         dh.create_global::<State, WlOutput, ()>(3, ());
         dh.create_global::<State, WlSeat, ()>(5, ());
         dh.create_global::<State, XdgWmBase, ()>(3, ());
+        dh.create_global::<State, wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::ZwlrLayerShellV1, ()>(4, ());
         let socket = ListeningSocket::bind_auto("wayland", 1..33)
             .map_err(|e| format!("can't create the Wayland socket: {e:?}"))?;
         let name = socket.socket_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -109,6 +112,8 @@ fn same_client(a: &impl Resource, b: &impl Resource) -> bool {
 
 /// An app window (toplevel) or menu (popup).
 struct Window {
+    /// Stable id for the panel and the control socket.
+    id: u32,
     surface: WlSurface,
     xdg: XdgSurface,
     toplevel: Option<XdgToplevel>,
@@ -128,7 +133,9 @@ struct Window {
 
 impl Window {
     fn new(surface: WlSurface, xdg: XdgSurface, toplevel: Option<XdgToplevel>, popup: Option<XdgPopup>, parent: Option<WlSurface>) -> Self {
-        Self { surface, xdg, toplevel, popup, parent, title: String::new(), x: 0, y: 0, geometry: None, placed: false }
+        static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { id, surface, xdg, toplevel, popup, parent, title: String::new(), x: 0, y: 0, geometry: None, placed: false }
     }
 }
 
@@ -165,6 +172,9 @@ pub struct State {
     buttons_down: u32,
     grab: Option<Grab>,
     subsurfaces: Vec<Sub>,
+    layers: Vec<Layer>,
+    /// Screen area not reserved by panels: x, y, w, h.
+    usable: (i32, i32, i32, i32),
     // Clipboard (see data.rs).
     dh: Option<DisplayHandle>,
     data_devices: Vec<WlDataDevice>,
@@ -193,6 +203,8 @@ impl State {
             buttons_down: 0,
             grab: None,
             subsurfaces: Vec::new(),
+            layers: Vec::new(),
+            usable: (0, 0, width as i32, height as i32),
             dh: Some(dh),
             data_devices: Vec::new(),
             selection: None,
@@ -208,10 +220,20 @@ impl State {
     /// drew now ride along with this frame until it's on screen.
     pub fn draw(&mut self, canvas: &mut Canvas) {
         self.in_flight.append(&mut self.frame_callbacks);
+        for layer in [layer::BACKGROUND, layer::BOTTOM] {
+            for l in self.layers_in(layer) {
+                self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, 0);
+            }
+        }
         for i in 0..self.windows.len() {
             if self.windows[i].placed {
                 let (x, y) = self.origin(i);
                 self.draw_tree(canvas, &self.windows[i].surface, x, y, 0);
+            }
+        }
+        for layer in [layer::TOP, layer::OVERLAY] {
+            for l in self.layers_in(layer) {
+                self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, 0);
             }
         }
     }
@@ -259,13 +281,25 @@ impl State {
         None
     }
 
-    /// Topmost window under (x, y): its index, and the exact surface hit
-    /// (maybe a subsurface) with coordinates local to that surface.
-    fn window_at(&self, x: f64, y: f64) -> Option<(usize, WlSurface, f64, f64)> {
-        (0..self.windows.len()).rev().filter(|&i| self.windows[i].placed).find_map(|i| {
-            let (ox, oy) = self.origin(i);
-            self.hit_tree(&self.windows[i].surface, ox, oy, x, y, 0).map(|(s, lx, ly)| (i, s, lx, ly))
-        })
+    /// Topmost surface under (x, y), in drawing order reversed: overlay and
+    /// top layers, windows, then bottom and background layers. Returns the
+    /// window index if it's a window, the exact surface hit (maybe a
+    /// subsurface), and coordinates local to that surface.
+    fn hit(&self, x: f64, y: f64) -> Option<(Option<usize>, WlSurface, f64, f64)> {
+        let layer_hit = |layer: u32| {
+            let ls: Vec<&Layer> = self.layers_in(layer).collect();
+            ls.into_iter().rev().find_map(|l| self.hit_tree(&l.surface, l.rect.0, l.rect.1, x, y, 0)).map(|(s, lx, ly)| (None, s, lx, ly))
+        };
+        layer_hit(layer::OVERLAY)
+            .or_else(|| layer_hit(layer::TOP))
+            .or_else(|| {
+                (0..self.windows.len()).rev().filter(|&i| self.windows[i].placed).find_map(|i| {
+                    let (ox, oy) = self.origin(i);
+                    self.hit_tree(&self.windows[i].surface, ox, oy, x, y, 0).map(|(s, lx, ly)| (Some(i), s, lx, ly))
+                })
+            })
+            .or_else(|| layer_hit(layer::BOTTOM))
+            .or_else(|| layer_hit(layer::BACKGROUND))
     }
 
     /// Offset of the window geometry inside the surface (shadow size).
@@ -301,13 +335,33 @@ impl State {
         }
     }
 
-    pub fn window_titles(&self) -> Vec<String> {
-        self.windows.iter().filter(|w| w.toplevel.is_some()).map(|w| w.title.clone()).collect()
+    /// Open windows: (id, title, focused), oldest first.
+    pub fn window_list(&self) -> Vec<(u32, String, bool)> {
+        let focused = self.kb_focus.as_ref().and_then(|s| self.root_window(s));
+        let mut list: Vec<(u32, String, bool)> = self
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.toplevel.is_some() && w.placed)
+            .map(|(i, w)| (w.id, w.title.clone(), Some(i) == focused))
+            .collect();
+        list.sort_by_key(|w| w.0);
+        list
+    }
+
+    /// Raise and focus a window by id (the panel's window list).
+    pub fn focus_window(&mut self, id: u32) -> bool {
+        let Some(i) = self.windows.iter().position(|w| w.id == id && w.toplevel.is_some()) else { return false };
+        let surface = self.windows[i].surface.clone();
+        self.raise(i);
+        self.set_keyboard_focus(Some(surface));
+        true
     }
 
     pub fn set_output_size(&mut self, width: u32, height: u32) {
         self.output.0 = width;
         self.output.1 = height;
+        self.arrange_layers();
     }
 
     /// First time a window has content: center it, cascading later ones.
@@ -321,9 +375,12 @@ impl State {
         }
         let (gx, gy, gw, gh) = self.windows[i].geometry.unwrap_or((0, 0, w, h));
         let step = 32 * (self.placed_count % 8);
+        // Center in the space panels leave free.
+        let (ux, uy, uw, uh) = self.usable;
+        let _ = (ow, oh);
         let win = &mut self.windows[i];
-        win.x = ((ow as i32 - gw) / 2).max(0) - gx + step;
-        win.y = ((oh as i32 - gh) / 2).max(0) - gy + step;
+        win.x = ux + ((uw - gw) / 2).max(0) - gx + step;
+        win.y = uy + ((uh - gh) / 2).max(0) - gy + step;
         win.placed = true;
         self.placed_count += 1;
         // A new window gets the keyboard.
@@ -402,6 +459,7 @@ impl Dispatch<WlSurface, Mutex<SurfaceState>> for State {
                 state.frame_callbacks.append(&mut s.pending_frames);
                 drop(s);
                 state.dirty = true;
+                state.layer_commit(surface);
                 state.place_window(surface);
             }
             _ => {}

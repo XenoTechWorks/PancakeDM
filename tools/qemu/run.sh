@@ -74,6 +74,13 @@ for d in /usr/lib/udev /etc/udev /usr/share/libinput /usr/share/X11/xkb; do
     [ -d "$d" ] && { mkdir -p "$STAGE$d"; cp -rL "$d/." "$STAGE$d/"; }
 done
 
+# Fonts for pancake-panel (its fallback paths, since there's no fontconfig).
+for f in /usr/share/fonts/noto/NotoSans-Regular.ttf /usr/share/fonts/noto/NotoSans-Bold.ttf; do
+    [ -e "$f" ] && put "$f"
+done
+PANEL=$ROOT/target/release/pancake-panel
+[ -x "$PANEL" ] && copy_bin "$PANEL" && cp "$PANEL" "$STAGE/usr/bin/pancake-panel"
+
 # Kernel modules for QEMU's virtual GPU and input, plus their dependencies.
 MODS="virtio_pci virtio_gpu virtio_input evdev psmouse"
 for m in $MODS; do

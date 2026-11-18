@@ -18,7 +18,7 @@ although borrowing code from them (and from wlroots, sway, etc.) is fine.
 | `crates/pancake-compositor` | Rust | Wayland compositor: windows, workspaces, policy |
 | `crates/pancake-config` | Rust | Config loading and live reload |
 | `crates/pancake-ipc` | Rust | Compositor ↔ shell IPC (`$XDG_RUNTIME_DIR/pancake.sock`) |
-| `crates/pancake-panel` | Rust | Top panel |
+| `crates/pancake-panel` | Rust | Top panel (layer shell, hand-drawn with fontdue) |
 | `crates/pancake-settings` | Rust | Settings app |
 | `session/` | sh | Session launcher + display-manager entry |
 
@@ -81,6 +81,23 @@ Variables you can override: `PREFIX`, `BINDIR`, `DATADIR`, `DESTDIR`,
 `JOBS` (default 2), `PROFILE` (default `release`) and `ZIG_BACKEND`
 (`auto`, `yes` or `no`).
 
+## The panel
+
+`pancake-panel` is a separate program the compositor starts at login
+(`--no-panel` skips it); it's found next to the compositor binary or in
+`PATH`, and gets `WAYLAND_DISPLAY` and `PANCAKE_SOCKET` pointing at the
+session. It's a floating rounded bar anchored to the top through
+`zwlr_layer_shell_v1`, reserving its space so windows open below it.
+
+It shows the Pancake button, a pill per open window (gold = focused;
+click to focus), and the date and time. It draws by hand: rounded
+shapes are its own code, text is rasterized with `fontdue` from the font
+`fc-match sans-serif` finds. The window list comes from the control
+socket (`windows` and `focus ID`, encoded by `pancake-ipc`).
+
+The compositor also supports other layer-shell clients (wallpapers,
+docks, launchers) in all four layers.
+
 ## Nested mode (development)
 
 Started from inside another Wayland desktop, `pancake-compositor` opens
@@ -90,7 +107,8 @@ as a window there and apps can connect to it, with no TTY or VM needed:
 ./target/release/pancake-compositor          # prints WAYLAND_DISPLAY=wayland-N
 WAYLAND_DISPLAY=wayland-N nautilus           # in another terminal
 pancake-compositor msg screenshot /tmp/a.png # PNG of what PancakeDM drew
-pancake-compositor msg windows               # open window titles
+pancake-compositor msg windows               # open windows (id, focused, title)
+pancake-compositor msg focus ID              # raise and focus a window
 pancake-compositor msg quit
 ```
 

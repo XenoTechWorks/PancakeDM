@@ -1,7 +1,7 @@
 //! The compositor's end of the control socket (see the pancake-ipc crate).
 //!
-//! Commands: `screenshot PATH` (PNG of screen 0's next frame),
-//! `windows` (titles, one per `|`), `quit`.
+//! Commands: `screenshot PATH` (PNG of screen 0's next frame), `windows`
+//! (see pancake_ipc::encode_windows), `focus ID`, `quit`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -12,6 +12,7 @@ use std::time::Duration;
 pub enum Command {
     Screenshot(PathBuf),
     Windows,
+    Focus(u32),
     Quit,
 }
 
@@ -55,6 +56,7 @@ impl Ipc {
             let cmd = match (words.next(), words.next()) {
                 (Some("screenshot"), Some(p)) => Command::Screenshot(PathBuf::from(p)),
                 (Some("windows"), None) => Command::Windows,
+                (Some("focus"), Some(id)) if id.parse::<u32>().is_ok() => Command::Focus(id.parse().unwrap()),
                 (Some("quit"), None) => Command::Quit,
                 _ => {
                     reply(stream, &format!("error unknown command: {}", line.trim()));

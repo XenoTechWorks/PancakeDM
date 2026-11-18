@@ -56,3 +56,64 @@ pub fn send(command: &str) -> Result<String, String> {
     BufReader::new(s).read_line(&mut reply).map_err(|e| e.to_string())?;
     Ok(reply.trim_end().to_string())
 }
+
+/// An open window, as listed by the `windows` command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowInfo {
+    pub id: u32,
+    pub title: String,
+    pub focused: bool,
+}
+
+// Records are separated by ASCII RS, fields by US, so titles can contain
+// anything printable.
+const RS: char = '\u{1e}';
+const US: char = '\u{1f}';
+
+/// Encode a window list for the `windows` reply (after "ok ").
+pub fn encode_windows(windows: &[WindowInfo]) -> String {
+    windows
+        .iter()
+        .map(|w| {
+            let title: String = w.title.chars().filter(|c| *c != RS && *c != US && *c != '\n').collect();
+            format!("{}{US}{}{US}{title}", w.id, w.focused as u8)
+        })
+        .collect::<Vec<_>>()
+        .join(&RS.to_string())
+}
+
+pub fn decode_windows(reply: &str) -> Vec<WindowInfo> {
+    let body = reply.strip_prefix("ok").unwrap_or(reply).trim_start_matches(' ');
+    body.split(RS)
+        .filter_map(|rec| {
+            let mut f = rec.splitn(3, US);
+            let id = f.next()?.parse().ok()?;
+            let focused = f.next()? == "1";
+            Some(WindowInfo { id, focused, title: f.next().unwrap_or("").to_string() })
+        })
+        .collect()
+}
+
+/// Ask the compositor for its open windows.
+pub fn windows() -> Result<Vec<WindowInfo>, String> {
+    let reply = send("windows")?;
+    if !reply.starts_with("ok") {
+        return Err(reply);
+    }
+    Ok(decode_windows(&reply))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_list_round_trips() {
+        let list = vec![
+            WindowInfo { id: 3, title: "Files | Home".into(), focused: false },
+            WindowInfo { id: 7, title: "".into(), focused: true },
+        ];
+        assert_eq!(decode_windows(&format!("ok {}", encode_windows(&list))), list);
+        assert_eq!(decode_windows("ok "), vec![]);
+    }
+}

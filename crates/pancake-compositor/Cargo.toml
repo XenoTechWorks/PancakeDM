@@ -13,6 +13,7 @@ wayland-client.workspace = true
 wayland-protocols.workspace = true
 memmap2.workspace = true
 xkbcommon.workspace = true
+wayland-protocols-wlr.workspace = true
 
 [features]
 # Link the Zig low-level layer (build it first: cd lowlevel && zig build)

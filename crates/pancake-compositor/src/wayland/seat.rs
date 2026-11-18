@@ -63,7 +63,7 @@ impl State {
     }
 
     /// Bring a window (and any popups) to the front.
-    fn raise(&mut self, i: usize) {
+    pub(super) fn raise(&mut self, i: usize) {
         if i + 1 != self.windows.len() {
             let w = self.windows.remove(i);
             self.windows.push(w);
@@ -174,7 +174,7 @@ impl State {
             }
             return;
         }
-        let target = self.window_at(x, y).map(|(_, s, sx, sy)| (s, sx, sy));
+        let target = self.hit(x, y).map(|(_, s, sx, sy)| (s, sx, sy));
         let time = self.time_ms();
         match target {
             Some((surface, sx, sy)) if Some(&surface) == self.pointer_focus.as_ref() => {
@@ -220,7 +220,7 @@ impl State {
         }
         if pressed {
             let (x, y) = self.pointer_pos;
-            let hit = self.window_at(x, y).map(|(i, ..)| i);
+            let hit = self.hit(x, y).and_then(|(i, ..)| i);
             // A click outside the open menus closes them.
             if hit.map_or(true, |i| self.windows[i].popup.is_none()) {
                 self.dismiss_popups();
