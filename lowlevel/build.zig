@@ -26,6 +26,10 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
+    // libdrm keeps drm.h in its own folder; override for odd layouts.
+    const drm_inc = b.option([]const u8, "drm-include", "libdrm include dir") orelse "/usr/include/libdrm";
+    lib.addSystemIncludePath(.{ .cwd_relative = drm_inc });
+    lib.linkSystemLibrary("drm");
     // Rust links without unwinding/sanitizer runtimes from Zig.
     lib.bundle_compiler_rt = true;
     b.installArtifact(lib);
