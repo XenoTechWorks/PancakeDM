@@ -8,12 +8,16 @@ pub struct Stats {
     pub mem: Option<f32>,
     /// 0..1 charge, and whether it's charging.
     pub battery: Option<(f32, bool)>,
+    /// CPU temperature, °C.
+    pub temp: Option<f32>,
+    /// 0..1 of the root filesystem used.
+    pub disk: Option<f32>,
     last_cpu: Option<(u64, u64)>, // (busy, total) jiffies
 }
 
 impl Stats {
     pub fn new() -> Self {
-        let mut s = Self { cpu: None, mem: None, battery: None, last_cpu: None };
+        let mut s = Self { cpu: None, mem: None, battery: None, temp: None, disk: None, last_cpu: None };
         s.refresh();
         s
     }
@@ -30,6 +34,8 @@ impl Stats {
         }
         self.mem = read_mem();
         self.battery = read_battery();
+        self.temp = pancake_fetch::temperature();
+        self.disk = pancake_fetch::disk().map(|(u, t)| u as f32 / t.max(1) as f32);
     }
 
     /// For "did anything change" checks (rounded to whole percents).

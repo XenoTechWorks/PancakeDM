@@ -1,0 +1,13 @@
+# Example greetd config for the PancakeDM login screen.
+# Copy to /etc/greetd/config.toml (as root) and enable greetd with your
+# init system (runit: ln -s /etc/sv/greetd /var/service; OpenRC:
+# rc-update add greetd; systemd: systemctl enable greetd).
+
+[terminal]
+# The VT the login screen runs on.
+vt = 7
+
+[default_session]
+# Runs as the greeter user (usually "_greeter" or "greeter").
+command = "pancake-compositor --greeter"
+user = "_greeter"

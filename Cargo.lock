@@ -424,6 +424,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "pancake-fetch"
+version = "0.1.0"
+
+[[package]]
+name = "pancake-greeter"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "memmap2",
+ "pancake-config",
+ "pancake-draw",
+ "pancake-fetch",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "xkbcommon",
+]
+
+[[package]]
 name = "pancake-hello"
 version = "0.1.0"
 dependencies = [
@@ -457,6 +476,7 @@ dependencies = [
  "memmap2",
  "pancake-config",
  "pancake-draw",
+ "pancake-fetch",
  "pancake-ipc",
  "wayland-client",
  "wayland-protocols",

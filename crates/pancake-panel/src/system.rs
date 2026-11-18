@@ -41,8 +41,18 @@ pub enum Net {
     Offline,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Weather {
+    /// "+5°C"
+    pub temp: String,
+    pub condition: String,
+    pub humidity: String,
+    pub location: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Info {
+    pub weather: Option<Weather>,
     pub media: Option<Media>,
     /// 0..1 (can exceed 1 when boosted), muted.
     pub volume: Option<(f32, bool)>,
@@ -89,6 +99,8 @@ fn run(cmd: &str, args: &[&str]) {
 pub struct System {
     pub info: Arc<Mutex<Info>>,
     wake: Arc<AtomicBool>,
+    /// Weather wanted, and where (empty: by IP). Changes trigger a fetch.
+    weather_want: Arc<Mutex<(bool, String)>>,
 }
 
 impl System {
@@ -96,7 +108,27 @@ impl System {
     pub fn start() -> Self {
         let info = Arc::new(Mutex::new(Info::default()));
         let wake = Arc::new(AtomicBool::new(true));
+        let weather_want = Arc::new(Mutex::new((false, String::new())));
         let (i, w) = (info.clone(), wake.clone());
+        // Weather on its own slow thread: every 15 minutes, or when the
+        // setting changes.
+        let (wi, ww) = (info.clone(), weather_want.clone());
+        std::thread::spawn(move || {
+            let mut last: Option<((bool, String), Instant)> = None;
+            loop {
+                let want = ww.lock().unwrap().clone();
+                let stale = last.as_ref().map_or(true, |(w, t)| *w != want || t.elapsed() > Duration::from_secs(900));
+                if stale {
+                    let got = if want.0 && have("curl") { fetch_weather(&want.1) } else { None };
+                    // Keep showing the old reading if a refresh fails.
+                    if got.is_some() || !want.0 {
+                        wi.lock().unwrap().weather = got;
+                    }
+                    last = Some((want, Instant::now()));
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        });
         std::thread::spawn(move || {
             let mut art_cache: Option<(String, Option<PathBuf>)> = None;
             loop {
@@ -110,7 +142,12 @@ impl System {
                 }
             }
         });
-        Self { info, wake }
+        Self { info, wake, weather_want }
+    }
+
+    /// Weather on/off and location, from the config.
+    pub fn set_weather(&self, on: bool, location: &str) {
+        *self.weather_want.lock().unwrap() = (on, location.to_string());
     }
 
     pub fn snapshot(&self) -> Info {
@@ -272,6 +309,26 @@ fn download_art(url: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// From wttr.in: "+5°C|Light rain|80%|Zurich" (metric). Needs network.
+fn fetch_weather(location: &str) -> Option<Weather> {
+    let loc: String = location.chars().map(|c| if c == ' ' { '+' } else { c }).filter(|c| c.is_alphanumeric() || "+-,.".contains(*c)).collect();
+    let url = format!("https://wttr.in/{loc}?format=%t|%C|%h|%l&m");
+    parse_weather(&output("curl", &["-sf", "--max-time", "8", &url])?)
+}
+
+pub fn parse_weather(s: &str) -> Option<Weather> {
+    let f: Vec<&str> = s.trim().split('|').collect();
+    if f.len() < 4 || !f[0].contains('°') {
+        return None;
+    }
+    Some(Weather {
+        temp: f[0].trim().trim_start_matches('+').to_string(),
+        condition: f[1].trim().to_string(),
+        humidity: f[2].trim().to_string(),
+        location: f[3].trim().split(',').next().unwrap_or("").to_string(),
+    })
+}
+
 fn poll_volume() -> Option<(f32, bool)> {
     parse_volume(&output("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])?)
 }
@@ -337,6 +394,15 @@ mod tests {
         assert_eq!(m.position, 60.0);
         assert!(parse_media("spotify\tStopped\ta\tb\t\t0\t0").is_none());
         assert!(parse_media("short").is_none());
+    }
+
+    #[test]
+    fn weather_line() {
+        let w = parse_weather("+5°C|Light rain|80%|Zurich, Switzerland\n").unwrap();
+        assert_eq!(w.temp, "5°C");
+        assert_eq!(w.condition, "Light rain");
+        assert_eq!(w.location, "Zurich");
+        assert!(parse_weather("Unknown location").is_none());
     }
 
     #[test]

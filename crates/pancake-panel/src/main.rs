@@ -65,12 +65,14 @@ enum Target {
     ControlCenter,
     MediaCard,
     PlayPause,
+    Dashboard,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PopupKind {
     Control,
     Media,
+    Dashboard,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -195,6 +197,9 @@ fn run() -> Result<(), String> {
     let mut settings: Option<std::process::Child> = None;
     let mut sys = stats::Stats::new();
     let system = System::start();
+    system.set_weather(cfg.weather, &cfg.weather_location);
+    // Fetch-style info for the dashboard (uptime refreshes as we draw).
+    let fetch: Vec<(&'static str, String)> = pancake_fetch::gather();
 
     let mut app = App {
         configured: [false; 2],
@@ -222,7 +227,11 @@ fn run() -> Result<(), String> {
     while app.running {
         let info = system.snapshot();
         if let Some(which) = open_at_start.as_deref() {
-            let want = if which == "media" { Target::MediaCard } else { Target::ControlCenter };
+            let want = match which {
+                "media" => Target::MediaCard,
+                "dashboard" => Target::Dashboard,
+                _ => Target::ControlCenter,
+            };
             if let Some((r, _)) = hits.iter().find(|(_, t)| *t == want) {
                 app.clicked = Some((BAR, (r.0 + r.2 / 2.0) as f64, (r.1 + r.3 / 2.0) as f64));
                 open_at_start = None;
@@ -252,6 +261,7 @@ fn run() -> Result<(), String> {
                         }
                         Target::ControlCenter => toggle(&mut popup, PopupKind::Control),
                         Target::MediaCard => toggle(&mut popup, PopupKind::Media),
+                        Target::Dashboard => toggle(&mut popup, PopupKind::Dashboard),
                         Target::PlayPause => {
                             system.act(Cmd::PlayPause);
                             None
@@ -313,6 +323,7 @@ fn run() -> Result<(), String> {
                 }
                 icons.set_theme(&new.icon_theme);
                 accent = pancake_draw::accent::effective(&new);
+                system.set_weather(new.weather, &new.weather_location);
                 if new.scale != scale {
                     scale = new.scale;
                     surface.set_buffer_scale(scale as i32);
@@ -395,7 +406,7 @@ fn run() -> Result<(), String> {
                 let px = pancake_draw::pixels(&mut p.bufs[i].1);
                 let mut canvas = Canvas::new(px, w as i32, h as i32, scale as f32);
                 let mut ui = Ui { c: &mut canvas, fonts: &mut fonts, icons: &mut icons, art: &mut art, apps: &apps, cfg: &cfg, accent, pointer: app.pointer.filter(|_| app.pointer_on == POPUP) };
-                let (hits, track) = ui.draw_card(kind, open, confirm, &info);
+                let (hits, track) = ui.draw_card(kind, open, confirm, &info, &sys, &fetch);
                 p.hits = hits;
                 if let (Some(t), Some((a, _))) = (track, p.drag) {
                     p.drag = Some((a, t.iter().find(|(k, _)| *k == a).map(|(_, r)| *r).unwrap_or_default()));
@@ -408,7 +419,10 @@ fn run() -> Result<(), String> {
         }
 
         conn.flush().map_err(|e| e.to_string())?;
-        let fast = popup.as_ref().is_some_and(|p| p.animating() || p.drag.is_some());
+        // The dashboard's vinyl spins while music plays.
+        let spinning = popup.as_ref().is_some_and(|p| p.kind == PopupKind::Dashboard && p.closing.is_none())
+            && info.media.as_ref().is_some_and(|m| m.playing);
+        let fast = popup.as_ref().is_some_and(|p| p.animating() || p.drag.is_some()) || spinning;
         let timeout = if fast { 16 } else if popup.is_some() { 120 } else { 250 };
         if let Some(guard) = queue.prepare_read() {
             if pancake_draw::wait_readable(fd, timeout) {
@@ -600,9 +614,9 @@ impl Ui<'_, '_> {
         let mut x = 6.0;
         let b = (x, mid - ISLAND_H / 2.0, ISLAND_H, ISLAND_H);
         self.c.rounded_rect(b.0, b.1, b.2, b.3, ISLAND_R, if inside(self.pointer, b) { SUBTLE_HOVER } else { ISLAND });
-        self.c.circle(x + 16.0, mid + 1.0, 9.0, GOLD_DARK);
-        self.c.circle(x + 16.0, mid, 7.5, GOLD);
-        self.c.circle(x + 13.5, mid - 2.5, 2.0, 0x55ffffff);
+        if let Some(logo) = pancake_draw::logo::image((24.0 * self.c.scale) as u32) {
+            self.c.image(&logo, (x + 4.0) as i32, (mid - 12.0) as i32);
+        }
         hits.push((b, Target::Launcher));
         x += ISLAND_H + GAP;
 
@@ -645,7 +659,11 @@ impl Ui<'_, '_> {
         let dgap = if date.is_empty() { 0.0 } else { 10.0 };
         let tw = self.fonts.width(&date, 13.0, false) + dgap + self.fonts.width(&time, 14.0, true);
         let clock_x = (w - tw - 28.0) / 2.0;
-        self.island(clock_x, mid, tw + 28.0);
+        let clock = self.island(clock_x, mid, tw + 28.0);
+        if open == Some(PopupKind::Dashboard) || inside(self.pointer, clock) {
+            self.c.rounded_rect(clock.0, clock.1, clock.2, clock.3, ISLAND_R, SUBTLE);
+        }
+        hits.push((clock, Target::Dashboard));
         let dw = self.c.text(self.fonts, &date, clock_x + 14.0, base, 13.0, false, TEXT_DIM);
         self.c.text(self.fonts, &time, clock_x + 14.0 + dw + dgap, base, 14.0, true, TEXT);
         let mut left_limit = clock_x - GAP;
@@ -717,16 +735,23 @@ impl Ui<'_, '_> {
         let mut right = cc.0 - GAP;
 
         // Status icons: network, Bluetooth (when on), volume with percent.
-        let mut icons: Vec<&str> = Vec::new();
+        let mut icons: Vec<String> = Vec::new();
         if info.net.is_some() || info.wifi_enabled.is_some() {
-            icons.push(Self::net_icon(&info.net, info.wifi_enabled));
+            icons.push(Self::net_icon(&info.net, info.wifi_enabled).into());
         }
         if info.bluetooth == Some(true) {
-            icons.push("bluetooth-active-symbolic");
+            icons.push("bluetooth-active-symbolic".into());
         }
         let vol_label = info.volume.map(|(v, m)| if m { "Muted".to_string() } else { format!("{:.0}%", v * 100.0) });
+        let battery = sys.battery.map(|(b, charging)| {
+            let level = ((b * 10.0).round() as u32 * 10).min(100);
+            (format!("battery-level-{level}{}-symbolic", if charging { "-charging" } else { "" }), format!("{:.0}%", b * 100.0))
+        });
+        if let Some((name, _)) = &battery {
+            icons.push(name.clone());
+        }
         if info.volume.is_some() {
-            icons.push(Self::volume_icon(info.volume));
+            icons.push(Self::volume_icon(info.volume).into());
         }
         if !icons.is_empty() {
             let lw = vol_label.as_ref().map(|l| self.fonts.width(l, 13.0, true) + 4.0).unwrap_or(0.0);
@@ -754,9 +779,6 @@ impl Ui<'_, '_> {
         }
         if let Some(m) = sys.mem {
             parts.push(("RAM".into(), format!("{:.0}%", m * 100.0), m));
-        }
-        if let Some((b, charging)) = sys.battery {
-            parts.push((if charging { "CHG".into() } else { "BAT".into() }, format!("{:.0}%", b * 100.0), b));
         }
         if !parts.is_empty() {
             let widths: Vec<f32> = parts.iter().map(|(l, v, _)| self.fonts.width(l, 11.0, true) + 6.0 + self.fonts.width(v, 13.0, true) + 22.0).collect();
@@ -790,7 +812,15 @@ impl Ui<'_, '_> {
     }
 
     /// Draw the open card. Returns its hit areas and the slider tracks.
-    fn draw_card(&mut self, kind: PopupKind, open: f32, confirm: Option<PAction>, info: &Info) -> (Vec<(Rect, PAction)>, Option<Vec<(PAction, Rect)>>) {
+    fn draw_card(
+        &mut self,
+        kind: PopupKind,
+        open: f32,
+        confirm: Option<PAction>,
+        info: &Info,
+        sys: &stats::Stats,
+        fetch: &[(&'static str, String)],
+    ) -> (Vec<(Rect, PAction)>, Option<Vec<(PAction, Rect)>>) {
         let (w, h) = (self.c.w as f32, self.c.h as f32);
         let accent = 0xff00_0000 | self.accent;
         let on_accent = text_on(self.accent);
@@ -907,6 +937,9 @@ impl Ui<'_, '_> {
                     self.c.text(self.fonts, &t, cx + cw - pad - tw, y + 62.0, 12.0, true, 0xffe8848a);
                 }
             }
+            PopupKind::Dashboard => {
+                card = self.draw_dashboard(w, h, top, below_bar, slide, info, sys, fetch, &mut hits);
+            }
             PopupKind::Media => {
                 let cw = 420.0;
                 let ch = 176.0;
@@ -977,6 +1010,235 @@ impl Ui<'_, '_> {
         hits.push(((0.0, 0.0, w, h), PAction::Close));
         self.c.fade_all(open);
         (hits, Some(tracks))
+    }
+}
+
+impl Ui<'_, '_> {
+    fn tile(&mut self, r: Rect) {
+        self.c.rounded_rect(r.0, r.1, r.2, r.3, 16.0, 0x12ffffff);
+    }
+
+    fn weather_icon(condition: &str) -> &'static str {
+        let c = condition.to_lowercase();
+        let night = !(6..19).contains(&chrono::Timelike::hour(&Local::now()));
+        if c.contains("thunder") {
+            "weather-storm-symbolic"
+        } else if c.contains("snow") || c.contains("sleet") || c.contains("ice") {
+            "weather-snow-symbolic"
+        } else if c.contains("rain") || c.contains("drizzle") || c.contains("shower") {
+            "weather-showers-symbolic"
+        } else if c.contains("fog") || c.contains("mist") || c.contains("haze") {
+            "weather-fog-symbolic"
+        } else if c.contains("overcast") {
+            "weather-overcast-symbolic"
+        } else if c.contains("cloud") {
+            if night { "weather-few-clouds-night-symbolic" } else { "weather-few-clouds-symbolic" }
+        } else if night {
+            "weather-clear-night-symbolic"
+        } else {
+            "weather-clear-symbolic"
+        }
+    }
+
+    /// A gauge ring: track and accent value, value text in the middle.
+    fn gauge(&mut self, cx: f32, cy: f32, v: Option<f32>, value: &str, label: &str) {
+        let accent = 0xff00_0000 | self.accent;
+        self.c.arc(cx, cy, 26.0, 5.0, 220.0, 280.0, 0x22ffffff);
+        if let Some(v) = v {
+            self.c.arc(cx, cy, 26.0, 5.0, 220.0, 280.0 * v.clamp(0.0, 1.0), accent);
+        }
+        let vw = self.fonts.width(value, 13.0, true);
+        self.c.text(self.fonts, value, cx - vw / 2.0, cy + 4.0, 13.0, true, TEXT);
+        let lw = self.fonts.width(label, 10.0, true);
+        self.c.text(self.fonts, label, cx - lw / 2.0, cy + 30.0, 10.0, true, TEXT_FAINT);
+    }
+
+    /// The dashboard (click the clock): weather, clock, system info,
+    /// calendar, performance gauges and media. Returns the card rect.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_dashboard(
+        &mut self,
+        w: f32,
+        h: f32,
+        top: bool,
+        below_bar: f32,
+        slide: f32,
+        info: &Info,
+        sys: &stats::Stats,
+        fetch: &[(&'static str, String)],
+        hits: &mut Vec<(Rect, PAction)>,
+    ) -> Rect {
+        let accent = 0xff00_0000 | self.accent;
+        let on_accent = text_on(self.accent);
+        let (pad, gap) = (14.0, 10.0);
+        let (wa, wb, wc, wd) = (230.0, 300.0, 170.0, 200.0);
+        let show_gauges = w > wa + wb + wc + wd + gap * 3.0 + pad * 2.0 + 40.0;
+        let inner_w = wa + wb + wd + gap * 2.0 + if show_gauges { wc + gap } else { 0.0 };
+        let (cw, ch) = (inner_w + pad * 2.0, 298.0 + pad * 2.0);
+        let cx = ((w - cw) / 2.0).max(MARGIN as f32);
+        let cy = if top { below_bar } else { h - below_bar - ch } + slide;
+        self.c.rounded_rect(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0, 25.0, GLASS_EDGE);
+        self.c.rounded_rect(cx, cy, cw, ch, 24.0, CARD_BG);
+        let (x0, y0) = (cx + pad, cy + pad);
+        let now = Local::now();
+
+        // Weather.
+        let r = (x0, y0, wa, 118.0);
+        self.tile(r);
+        match &info.weather {
+            Some(wt) => {
+                self.sym(Self::weather_icon(&wt.condition), r.0 + 46.0, r.1 + 59.0, 52.0, TEXT);
+                self.c.text(self.fonts, &wt.temp, r.0 + 88.0, r.1 + 52.0, 28.0, true, TEXT);
+                let cond = self.fonts.fit(&wt.condition, 13.0, false, wa - 100.0);
+                self.c.text(self.fonts, &cond, r.0 + 88.0, r.1 + 74.0, 13.0, false, TEXT_DIM);
+                let place = self.fonts.fit(&format!("{} · {}", wt.location, wt.humidity), 11.0, false, wa - 100.0);
+                self.c.text(self.fonts, &place, r.0 + 88.0, r.1 + 92.0, 11.0, false, TEXT_FAINT);
+            }
+            None => {
+                self.sym("weather-clear-symbolic", r.0 + 46.0, r.1 + 59.0, 44.0, TEXT_FAINT);
+                let msg = if self.cfg.weather { "Getting weather…" } else { "Weather is off" };
+                self.c.text(self.fonts, msg, r.0 + 88.0, r.1 + 64.0, 13.0, false, TEXT_DIM);
+            }
+        }
+
+        // Big clock and date.
+        let r = (x0, y0 + 128.0, wa, 170.0);
+        self.tile(r);
+        let time = if self.cfg.clock_24h { now.format("%H:%M") } else { now.format("%-I:%M") }.to_string();
+        let tw = self.fonts.width(&time, 50.0, true);
+        self.c.text(self.fonts, &time, r.0 + (wa - tw) / 2.0, r.1 + 82.0, 50.0, true, TEXT);
+        let date = now.format("%A, %-d %B").to_string();
+        let date = self.fonts.fit(&date, 14.0, true, wa - 24.0);
+        let dw = self.fonts.width(&date, 14.0, true);
+        self.c.text(self.fonts, &date, r.0 + (wa - dw) / 2.0, r.1 + 112.0, 14.0, true, accent);
+        if let Some(up) = pancake_fetch::uptime_secs() {
+            let t = format!("up {}", pancake_fetch::format_uptime(up));
+            let t = self.fonts.fit(&t, 11.0, false, wa - 24.0);
+            let uw = self.fonts.width(&t, 11.0, false);
+            self.c.text(self.fonts, &t, r.0 + (wa - uw) / 2.0, r.1 + 140.0, 11.0, false, TEXT_FAINT);
+        }
+
+        // System info (fetch-style) with the palette as dots.
+        let xb = x0 + wa + gap;
+        let r = (xb, y0, wb, 118.0);
+        self.tile(r);
+        if let Some(logo) = pancake_draw::logo::image((52.0 * self.c.scale) as u32) {
+            self.c.image(&logo, (r.0 + 12.0) as i32, (r.1 + 14.0) as i32);
+        }
+        let mut ly = r.1 + 24.0;
+        for key in ["OS", "Kernel", "Packages", "Shell"] {
+            if let Some((_, v)) = fetch.iter().find(|(k, _)| *k == key) {
+                let v = if key == "Packages" { v.split(", ").next().unwrap_or(v).to_string() } else { v.clone() };
+                let kw = self.c.text(self.fonts, key, r.0 + 76.0, ly, 11.0, true, accent);
+                let v = self.fonts.fit(&v, 11.0, false, wb - 84.0 - kw - 6.0);
+                self.c.text(self.fonts, &v, r.0 + 76.0 + kw + 6.0, ly, 11.0, false, TEXT);
+                ly += 17.0;
+            }
+        }
+        for (i, col) in ACCENTS.iter().enumerate() {
+            self.c.circle(r.0 + 22.0 + i as f32 * 20.0, r.1 + 100.0, 6.0, *col);
+        }
+
+        // Calendar for this month, today highlighted.
+        let r = (xb, y0 + 128.0, wb, 170.0);
+        self.tile(r);
+        let month = now.format("%B %Y").to_string();
+        self.c.text(self.fonts, &month, r.0 + 14.0, r.1 + 22.0, 13.0, true, TEXT);
+        let today = now.date_naive();
+        let first = chrono::NaiveDate::from_ymd_opt(chrono::Datelike::year(&today), chrono::Datelike::month(&today), 1).unwrap();
+        let lead = chrono::Datelike::weekday(&first).num_days_from_sunday() as i32;
+        let days_in = {
+            let (y, m) = (chrono::Datelike::year(&today), chrono::Datelike::month(&today));
+            let next = if m == 12 { chrono::NaiveDate::from_ymd_opt(y + 1, 1, 1) } else { chrono::NaiveDate::from_ymd_opt(y, m + 1, 1) }.unwrap();
+            (next - first).num_days() as i32
+        };
+        let cell_w = (wb - 24.0) / 7.0;
+        for (i, d) in ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].iter().enumerate() {
+            let dw = self.fonts.width(d, 10.0, true);
+            self.c.text(self.fonts, d, r.0 + 12.0 + i as f32 * cell_w + (cell_w - dw) / 2.0, r.1 + 42.0, 10.0, true, TEXT_FAINT);
+        }
+        let day_today = chrono::Datelike::day(&today) as i32;
+        for d in 1..=days_in {
+            let slot = lead + d - 1;
+            let (col, row) = (slot % 7, slot / 7);
+            let (dx, dy) = (r.0 + 12.0 + col as f32 * cell_w, r.1 + 52.0 + row as f32 * 19.0);
+            let label = d.to_string();
+            let lw = self.fonts.width(&label, 11.0, d == day_today);
+            if d == day_today {
+                self.c.circle(dx + cell_w / 2.0, dy + 8.0, 9.5, accent);
+            }
+            let fg = if d == day_today { on_accent } else if col == 0 || col == 6 { TEXT_DIM } else { TEXT };
+            self.c.text(self.fonts, &label, dx + (cell_w - lw) / 2.0, dy + 12.0, 11.0, d == day_today, fg);
+        }
+
+        // Performance gauges.
+        let mut xd = xb + wb + gap;
+        if show_gauges {
+            let r = (xd, y0, wc, 298.0);
+            self.tile(r);
+            let pct = |v: Option<f32>| v.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_else(|| "–".into());
+            let temp = sys.temp.map(|t| format!("{t:.0}°")).unwrap_or_else(|| "–".into());
+            let (lx, rx) = (r.0 + wc / 4.0 + 2.0, r.0 + wc * 3.0 / 4.0 - 2.0);
+            self.gauge(lx, r.1 + 78.0, sys.cpu, &pct(sys.cpu), "CPU");
+            self.gauge(rx, r.1 + 78.0, sys.temp.map(|t| t / 100.0), &temp, "TEMP");
+            self.gauge(lx, r.1 + 206.0, sys.mem, &pct(sys.mem), "MEMORY");
+            self.gauge(rx, r.1 + 206.0, sys.disk, &pct(sys.disk), "DISK");
+            xd += wc + gap;
+        }
+
+        // Media: a spinning record with the art in the middle.
+        let r = (xd, y0, wd, 298.0);
+        self.tile(r);
+        let (vx, vy) = (r.0 + wd / 2.0, r.1 + 92.0);
+        self.c.circle(vx, vy, 70.0, 0xff141110);
+        for k in 0..5 {
+            self.c.arc(vx, vy, 44.0 + k as f32 * 5.0, 1.0, 0.0, 360.0, 0x14ffffff); // grooves
+        }
+        match &info.media {
+            Some(m) => {
+                // A sheen that turns while playing.
+                let turn = if m.playing { (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() % 4000) as f32 / 4000.0 * 360.0 } else { 30.0 };
+                self.c.arc(vx, vy, 58.0, 14.0, turn, 40.0, 0x1effffff);
+                self.c.arc(vx, vy, 58.0, 14.0, turn + 180.0, 40.0, 0x1effffff);
+                let art_px = (76.0 * self.c.scale) as u32;
+                let art = m.art.as_ref().and_then(|p| self.art.get(p, art_px, 38.0 * self.c.scale)).cloned();
+                match art {
+                    Some(img) => self.c.image(&img, (vx - 38.0) as i32, (vy - 38.0) as i32),
+                    None => {
+                        self.c.circle(vx, vy, 38.0, accent);
+                        self.sym("audio-x-generic-symbolic", vx, vy, 30.0, on_accent);
+                    }
+                }
+                self.c.circle(vx, vy, 4.0, 0xff141110);
+                let title = self.fonts.fit(if m.title.is_empty() { "Unknown" } else { &m.title }, 14.0, true, wd - 24.0);
+                let tw = self.fonts.width(&title, 14.0, true);
+                self.c.text(self.fonts, &title, vx - tw / 2.0, r.1 + 194.0, 14.0, true, TEXT);
+                let artist = self.fonts.fit(&m.artist, 12.0, false, wd - 24.0);
+                let aw = self.fonts.width(&artist, 12.0, false);
+                self.c.text(self.fonts, &artist, vx - aw / 2.0, r.1 + 213.0, 12.0, false, TEXT_DIM);
+                let row = r.1 + 252.0;
+                for (dx, action, icon, big) in [
+                    (-48.0, PAction::Previous, "media-skip-backward-symbolic", false),
+                    (0.0, PAction::PlayPause, if m.playing { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" }, true),
+                    (48.0, PAction::Next, "media-skip-forward-symbolic", false),
+                ] {
+                    let rad = if big { 20.0 } else { 15.0 };
+                    let br = (vx + dx - rad, row - rad, rad * 2.0, rad * 2.0);
+                    let bg = if big { accent } else if inside(self.pointer, br) { SUBTLE_HOVER } else { SUBTLE };
+                    self.c.circle(vx + dx, row, rad, bg);
+                    self.sym(icon, vx + dx, row, if big { 18.0 } else { 14.0 }, if big { on_accent } else { TEXT });
+                    hits.push((br, action));
+                }
+            }
+            None => {
+                self.c.circle(vx, vy, 38.0, 0x22ffffff);
+                self.sym("audio-x-generic-symbolic", vx, vy, 28.0, TEXT_FAINT);
+                let t = "Nothing playing";
+                let tw = self.fonts.width(t, 13.0, true);
+                self.c.text(self.fonts, t, vx - tw / 2.0, r.1 + 200.0, 13.0, true, TEXT_DIM);
+            }
+        }
+        (cx, cy, cw, ch)
     }
 }
 

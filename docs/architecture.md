@@ -89,7 +89,8 @@ Variables you can override: `PREFIX`, `BINDIR`, `DATADIR`, `DESTDIR`,
 session. It's a floating rounded bar anchored to the top through
 `zwlr_layer_shell_v1`, reserving its space so windows open below it.
 
-It's built from "widget islands" (rounded groups, in the spirit of
+Its launcher button shows the PancakeDM logo (`data/icons/pancakedm.svg`,
+built into pancake-draw and installed as the `pancakedm` icon). It's built from "widget islands" (rounded groups, in the spirit of
 DankMaterialShell): the Pancake button; a workspace switcher showing each
 workspace's app icons, with the active one as an accent pill (click to
 switch); the focused window's icon and title; the clock; CPU, memory and
@@ -141,6 +142,8 @@ scale = 1                     # 1, 2 or 3 for HiDPI screens
 position = top                # top or bottom
 clock = 24h                   # 24h or 12h
 show-date = true
+weather = true                # from wttr.in (sees your IP address)
+weather-location =            # a city, or empty to guess from your IP
 
 [theme]
 accent = auto                 # from the wallpaper, or a color like #f4a259
@@ -259,6 +262,49 @@ and cached in `~/.cache/pancake/art`.
 
 `PANCAKE_PANEL_OPEN=control` (or `media`) opens a card at startup, for
 testing and screenshots.
+
+## Dashboard
+
+Clicking the clock opens the dashboard (inspired by Caelestia): weather,
+a big clock with the date and uptime, system info with the PancakeDM
+logo and the palette, this month's calendar, gauges for CPU, temperature,
+memory and disk, and media on a record that spins while music plays. The
+gauges hide on narrow screens.
+
+Weather comes from wttr.in (`curl`, every 15 minutes). **It sees your IP
+address**, which it also uses to guess your location unless you set
+`weather-location`. Turn it off with `weather = off`.
+
+## pancake-fetch
+
+`pancake-fetch` prints a fastfetch-style summary next to a pancake stack:
+OS, kernel, uptime, packages, shell, desktop, CPU, GPU (via `lspci`),
+memory and disk. Package counts come straight from the package databases
+of KISS, pacman, dpkg, apk, xbps and rpm, plus Flatpak. The same library
+feeds the dashboard.
+
+## Login screen (greetd)
+
+`pancake-greeter` is a greeter for greetd, which works with any init
+system. greetd runs `pancake-compositor --greeter`, which starts only the
+greeter (no panel, launcher or keybinds) and exits when it does; greetd
+then starts the session. The greeter shows a big clock and date, the
+user's avatar (`~/.face` or AccountsService, else the logo) and name
+(arrows switch between users with uid 1000+ and a login shell), a password
+field, and restart/power off. A wrong password shakes the card.
+
+To use it (as root; adjust the greeter user to your distro's):
+
+1. Install greetd and PancakeDM (`make install`).
+2. Copy `data/greetd/config.toml` to `/etc/greetd/config.toml`.
+3. For the wallpaper on the login screen, copy it to
+   `/usr/share/pancake/wallpapers/` (the greeter user can't read your home).
+4. Enable greetd with your init system and disable your old display manager.
+
+The session it starts is `pancake-session` (override with
+`PANCAKE_GREETER_SESSION`). Without greetd (no `$GREETD_SOCK`) the greeter
+runs in demo mode and accepts any password, for testing:
+`pancake-compositor --greeter` inside another desktop.
 
 ## Accent from the wallpaper
 

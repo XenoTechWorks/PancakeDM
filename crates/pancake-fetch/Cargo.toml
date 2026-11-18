@@ -1,0 +1,13 @@
+[package]
+name = "pancake-fetch"
+description = "System info for PancakeDM (library and fastfetch-like command)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pancake-fetch"
+path = "src/main.rs"

@@ -32,6 +32,8 @@ Ctrl+Alt+Backspace quits, Ctrl+Alt+F1..F12 switches VT.
 
   --drm              use the real screens even inside a Wayland desktop
   --no-panel         don't start pancake-panel
+  --greeter          login screen mode for greetd: runs pancake-greeter only
+                     (no panel, launcher or keybinds) and exits with it
   --fill RRGGBB      background color, no wallpaper (overrides pancake.conf)
   --anim             slide a bar across the background (shows any tearing)
   --seconds N        quit after N seconds (default: never)
@@ -56,7 +58,7 @@ fn main() -> ExitCode {
         };
     }
     let (mut list, mut input, mut fill, mut seconds, mut device) = (false, false, None, 0u64, None);
-    let (mut anim, mut force_drm, mut panel) = (false, false, true);
+    let (mut anim, mut force_drm, mut panel, mut greeter) = (false, false, true, false);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--list" => list = true,
@@ -64,6 +66,7 @@ fn main() -> ExitCode {
             "--anim" => anim = true,
             "--drm" => force_drm = true,
             "--no-panel" => panel = false,
+            "--greeter" => greeter = true,
             "--fill" => match args.next().and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok()) {
                 Some(c) => fill = Some(c),
                 None => return fail("--fill needs a color like f4a259"),
@@ -99,7 +102,7 @@ fn main() -> ExitCode {
         } else {
             backend::drm::DrmBackend::new(device.as_deref()).map(|b| Box::new(b) as Box<dyn Backend>)
         };
-        backend.and_then(|mut b| run_session(b.as_mut(), fill, anim, panel, deadline))
+        backend.and_then(|mut b| run_session(b.as_mut(), fill, anim, panel && !greeter, greeter, deadline))
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -271,7 +274,7 @@ fn spawn_shell_program(name: &str, wayland_display: &str, socket: &std::path::Pa
     }
 }
 
-fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: bool, deadline: Option<Instant>) -> Result<(), String> {
+fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: bool, greeter: bool, deadline: Option<Instant>) -> Result<(), String> {
     let mut outputs = backend.outputs();
     print_outputs(&outputs);
     let count = outputs.len();
@@ -284,6 +287,12 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
     let ipc = ipc::Ipc::bind(&server.name)?;
     eprintln!("pancake-compositor: PANCAKE_SOCKET={}", ipc.path().display());
     let _panel = if panel { spawn_shell_program("pancake-panel", &server.name, ipc.path()) } else { None };
+    // Login screen mode: the greeter is the whole session.
+    let mut greeter_child = if greeter {
+        Some(spawn_shell_program("pancake-greeter", &server.name, ipc.path()).ok_or("can't start pancake-greeter")?)
+    } else {
+        None
+    };
     let mut launcher: Option<Child> = None;
     // Open the launcher, or close it if it's open.
     let session_name = server.name.clone();
@@ -333,6 +342,13 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
     let mut events = Vec::new();
 
     while !expired(deadline) {
+        // Greeter mode ends when the greeter does (greetd then starts the
+        // session it logged in).
+        if let Some(g) = greeter_child.as_mut() {
+            if !matches!(g.0.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+        }
         if last_config_check.elapsed() >= Duration::from_millis(500) {
             last_config_check = Instant::now();
             if config_watch.changed() {
@@ -474,11 +490,12 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                     }
                     match ev {
                         InputEvent::Key { code, pressed } => {
-                            if mods.update(code, pressed) {
+                            if mods.update(code, pressed) && !greeter {
                                 toggle_launcher(&mut launcher);
                             }
                             // Keybinds: run on press; swallow press and release.
-                            if pressed {
+                            // (None on the login screen.)
+                            if pressed && !greeter {
                                 if let Some(a) = binds.lookup(mods.bits(), code).cloned() {
                                     consumed.insert(code);
                                     mods.meta_alone = false;

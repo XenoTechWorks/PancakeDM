@@ -13,4 +13,5 @@ wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 memmap2.workspace = true
 pancake-draw.workspace = true
+pancake-fetch.workspace = true
 chrono.workspace = true

@@ -66,6 +66,10 @@ pub struct Config {
     pub panel_position: PanelPosition,
     pub clock_24h: bool,
     pub show_date: bool,
+    /// Weather in the dashboard (from wttr.in, which sees your IP address).
+    pub weather: bool,
+    /// City for the weather; empty = guess from your IP address.
+    pub weather_location: String,
     /// 0xRRGGBB, for focus and selection highlights (when not automatic).
     pub accent: u32,
     /// Take the accent from the wallpaper.
@@ -95,6 +99,8 @@ impl Default for Config {
             panel_position: PanelPosition::Top,
             clock_24h: true,
             show_date: true,
+            weather: true,
+            weather_location: String::new(),
             accent: 0xf4a259,
             accent_auto: true,
             icon_theme: "Adwaita".into(),
@@ -249,6 +255,11 @@ pub fn parse(text: &str) -> Config {
             .map(|b| c.clock_24h = b)
             .is_some(),
             ("panel", "show-date") => parse_bool(v).map(|b| c.show_date = b).is_some(),
+            ("panel", "weather") => parse_bool(v).map(|b| c.weather = b).is_some(),
+            ("panel", "weather-location") => {
+                c.weather_location = v.to_string();
+                true
+            }
             ("theme", "accent") if v == "auto" => {
                 c.accent_auto = true;
                 true
@@ -310,6 +321,10 @@ pub fn to_text(c: &Config) -> String {
          # 24h or 12h\n\
          clock = {}\n\
          show-date = {}\n\
+         # Weather comes from wttr.in (it sees your IP address); on or off\n\
+         weather = {}\n\
+         # A city name, or empty to guess from your IP address\n\
+         weather-location = {}\n\
          \n\
          [theme]\n\
          # auto takes it from the wallpaper, or a color like #f4a259\n\
@@ -338,6 +353,8 @@ pub fn to_text(c: &Config) -> String {
         if c.panel_position == PanelPosition::Top { "top" } else { "bottom" },
         if c.clock_24h { "24h" } else { "12h" },
         c.show_date,
+        c.weather,
+        c.weather_location,
         if c.accent_auto { "auto".to_string() } else { format!("#{:06x}", c.accent) },
         c.icon_theme,
         if c.layout == Layout::Tiling { "tiling" } else { "floating" },
@@ -458,6 +475,8 @@ mod tests {
         c.accent_auto = false;
         c.layout = Layout::Floating;
         c.scale = 2;
+        c.weather = false;
+        c.weather_location = "Zurich".into();
         c.keybinds = vec![("super+t".into(), "spawn foot".into())];
         assert_eq!(parse(&to_text(&c)), c);
     }

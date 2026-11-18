@@ -6,6 +6,7 @@
 
 pub mod accent;
 pub mod apps;
+pub mod logo;
 pub mod icons;
 pub mod images;
 
@@ -253,6 +254,51 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// An anti-aliased arc (ring segment) centered on (cx, cy) with radius
+    /// `r` (to the middle of the stroke), `t` thick. Angles in degrees,
+    /// 0 = up, clockwise; `sweep` 360 draws a full ring.
+    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, t: f32, start: f32, sweep: f32, color: u32) {
+        let s = self.scale;
+        let (cx, cy, r, t) = (cx * s, cy * s, r * s, t * s);
+        let (pw, ph) = (self.pw(), self.ph());
+        let (outer, inner) = (r + t / 2.0, r - t / 2.0);
+        let (x0, y0) = (((cx - outer).floor() as i32).max(0), ((cy - outer).floor() as i32).max(0));
+        let (x1, y1) = (((cx + outer).ceil() as i32).min(pw), ((cy + outer).ceil() as i32).min(ph));
+        let sweep = sweep.clamp(0.0, 360.0);
+        // Round caps: centers of the two ends.
+        let end = |deg: f32| {
+            let a = deg.to_radians();
+            (cx + r * a.sin(), cy - r * a.cos())
+        };
+        let (c0, c1) = (end(start), end(start + sweep));
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+                let (dx, dy) = (fx - cx, fy - cy);
+                let d = (dx * dx + dy * dy).sqrt();
+                let radial = (0.5 - (d - outer)).clamp(0.0, 1.0) * (0.5 - (inner - d)).clamp(0.0, 1.0);
+                let mut cover = 0.0;
+                if radial > 0.0 {
+                    let ang = (dx.atan2(-dy).to_degrees() + 360.0) % 360.0;
+                    let rel = (ang - start % 360.0 + 720.0) % 360.0;
+                    if sweep >= 360.0 || rel <= sweep {
+                        cover = radial;
+                    }
+                }
+                if sweep < 360.0 {
+                    for (ex, ey) in [c0, c1] {
+                        let de = ((fx - ex).powi(2) + (fy - ey).powi(2)).sqrt();
+                        cover = f32::max(cover, (0.5 - (de - t / 2.0)).clamp(0.0, 1.0));
+                    }
+                }
+                if cover > 0.0 {
+                    let i = (py * pw + px) as usize;
+                    self.px[i] = over(premul(color, cover), self.px[i]);
+                }
+            }
+        }
+    }
+
     pub fn circle(&mut self, cx: f32, cy: f32, r: f32, color: u32) {
         self.rounded_rect(cx - r, cy - r, r * 2.0, r * 2.0, r, color);
     }
@@ -304,6 +350,16 @@ mod tests {
         let mut px = vec![0u32; 10 * 10];
         Canvas::new(&mut px, 10, 10, 1.0).rounded_rect(0.0, 0.0, 10.0, 10.0, 0.0, 0xff00_ff00);
         assert!(px.iter().all(|&p| p == 0xff00_ff00));
+    }
+
+    #[test]
+    fn arc_covers_only_its_sweep() {
+        let mut px = vec![0u32; 40 * 40];
+        let mut c = Canvas::new(&mut px, 40, 40, 1.0);
+        c.arc(20.0, 20.0, 15.0, 4.0, 0.0, 90.0, 0xffff_ffff); // top to right
+        assert!(px[20 * 40 + 35] >> 24 > 200); // right side (90 deg)
+        assert_eq!(px[35 * 40 + 20], 0); // bottom (180 deg): not drawn
+        assert_eq!(px[20 * 40 + 20], 0); // center: not drawn
     }
 
     #[test]

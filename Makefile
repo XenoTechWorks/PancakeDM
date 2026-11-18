@@ -17,6 +17,7 @@ BINDIR      = $(PREFIX)/bin
 DATADIR     = $(PREFIX)/share
 SESSIONDIR  = $(DATADIR)/wayland-sessions
 APPDIR      = $(DATADIR)/applications
+ICONDIR     = $(DATADIR)/icons/hicolor/scalable/apps
 DOCDIR      = $(DATADIR)/doc/pancakedm
 DESTDIR     =
 
@@ -26,7 +27,7 @@ JOBS        = 2
 PROFILE     = release
 ZIG_BACKEND = auto
 
-BINS = pancake-compositor pancake-panel pancake-launcher pancake-settings
+BINS = pancake-compositor pancake-panel pancake-launcher pancake-settings pancake-greeter pancake-fetch
 
 all: build
 
@@ -63,7 +64,7 @@ run: build
 # ---- install ----------------------------------------------------------------
 
 install:
-	mkdir -p "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(SESSIONDIR)" "$(DESTDIR)$(DOCDIR)" "$(DESTDIR)$(APPDIR)"
+	mkdir -p "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(SESSIONDIR)" "$(DESTDIR)$(DOCDIR)" "$(DESTDIR)$(APPDIR)" "$(DESTDIR)$(ICONDIR)"
 	for b in $(BINS); do \
 		cp "target/$(PROFILE)/$$b" "$(DESTDIR)$(BINDIR)/$$b" && \
 		chmod 755 "$(DESTDIR)$(BINDIR)/$$b" || exit 1; \
@@ -74,12 +75,14 @@ install:
 	chmod 644 "$(DESTDIR)$(SESSIONDIR)/pancake.desktop"
 	cp data/applications/org.pancakedm.Settings.desktop "$(DESTDIR)$(APPDIR)/"
 	chmod 644 "$(DESTDIR)$(APPDIR)/org.pancakedm.Settings.desktop"
-	cp README.md docs/architecture.md "$(DESTDIR)$(DOCDIR)/"
+	cp data/icons/pancakedm.svg "$(DESTDIR)$(ICONDIR)/pancakedm.svg"
+	cp README.md docs/architecture.md data/greetd/config.toml "$(DESTDIR)$(DOCDIR)/"
 
 uninstall:
 	for b in $(BINS) pancake-session; do rm -f "$(DESTDIR)$(BINDIR)/$$b"; done
 	rm -f "$(DESTDIR)$(SESSIONDIR)/pancake.desktop"
 	rm -f "$(DESTDIR)$(APPDIR)/org.pancakedm.Settings.desktop"
+	rm -f "$(DESTDIR)$(ICONDIR)/pancakedm.svg"
 	rm -rf "$(DESTDIR)$(DOCDIR)"
 
 # ---- clean ------------------------------------------------------------------

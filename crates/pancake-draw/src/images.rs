@@ -39,6 +39,11 @@ pub fn load(path: &Path, size: Option<(u32, u32)>) -> Option<Image> {
     Some(from_rgba(img.width(), img.height(), img.as_raw(), false))
 }
 
+/// Render SVG data (e.g. a built-in icon).
+pub fn load_svg_bytes(data: &[u8], size: Option<(u32, u32)>) -> Option<Image> {
+    load_svg(data, size)
+}
+
 fn load_svg(data: &[u8], size: Option<(u32, u32)>) -> Option<Image> {
     use resvg::{tiny_skia, usvg};
     let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
