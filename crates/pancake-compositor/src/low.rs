@@ -20,6 +20,14 @@ mod ffi {
         pub fn pancake_low_fill(dev: *mut c_void, index: u32, xrgb: u32) -> c_int;
         pub fn pancake_low_close(dev: *mut c_void);
 
+        pub fn pancake_cursor_size(dev: *mut c_void, w: *mut u32, h: *mut u32);
+        pub fn pancake_cursor_set(dev: *mut c_void, index: u32, pixels: *const u32, w: u32, h: u32, hot_x: i32, hot_y: i32) -> c_int;
+        pub fn pancake_cursor_move(dev: *mut c_void, index: u32, x: i32, y: i32) -> c_int;
+        pub fn pancake_cursor_hide(dev: *mut c_void, index: u32) -> c_int;
+
+        pub fn pancake_vt_take() -> c_int;
+        pub fn pancake_vt_release();
+
         pub fn pancake_input_open(seat: *const c_char) -> *mut c_void;
         pub fn pancake_input_fd(input: *mut c_void) -> c_int;
         pub fn pancake_input_next(input: *mut c_void, out: *mut InputEvent) -> c_int;
@@ -111,6 +119,33 @@ impl Device {
             e => Err(format!("fill failed ({e})")),
         }
     }
+
+    /// Largest cursor image the GPU's cursor plane takes.
+    pub fn cursor_size(&self) -> (u32, u32) {
+        let (mut w, mut h) = (0, 0);
+        unsafe { ffi::pancake_cursor_size(self.raw, &mut w, &mut h) };
+        (w, h)
+    }
+
+    pub fn set_cursor(&self, index: u32, img: &crate::cursor::CursorImage) -> Result<(), String> {
+        let r = unsafe {
+            ffi::pancake_cursor_set(self.raw, index, img.pixels.as_ptr(), img.width, img.height, img.hot_x, img.hot_y)
+        };
+        match r {
+            0 => Ok(()),
+            -3 => Err("this GPU has no hardware cursor plane".into()),
+            -4 => Err("cursor image is bigger than the GPU's cursor plane".into()),
+            e => Err(format!("cursor setup failed ({e})")),
+        }
+    }
+
+    pub fn move_cursor(&self, index: u32, x: i32, y: i32) {
+        unsafe { ffi::pancake_cursor_move(self.raw, index, x, y) };
+    }
+
+    pub fn hide_cursor(&self, index: u32) {
+        unsafe { ffi::pancake_cursor_hide(self.raw, index) };
+    }
 }
 
 #[cfg(feature = "zig-backend")]
@@ -131,6 +166,14 @@ impl Device {
     pub fn fill(&self, _index: u32, _xrgb: u32) -> Result<(), String> {
         Err("built without the Zig low-level layer".into())
     }
+    pub fn cursor_size(&self) -> (u32, u32) {
+        (64, 64)
+    }
+    pub fn set_cursor(&self, _index: u32, _img: &crate::cursor::CursorImage) -> Result<(), String> {
+        Err("built without the Zig low-level layer".into())
+    }
+    pub fn move_cursor(&self, _index: u32, _x: i32, _y: i32) {}
+    pub fn hide_cursor(&self, _index: u32) {}
 }
 
 // ---- Input ------------------------------------------------------------------
@@ -141,6 +184,7 @@ pub mod key {
     pub const SPACE: u32 = 57;
 }
 
+#[cfg_attr(not(feature = "zig-backend"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     DeviceAdded(String),
@@ -214,5 +258,34 @@ impl Input {
     }
     pub fn next(&self) -> Option<InputEvent> {
         None
+    }
+}
+
+// ---- Virtual terminal -------------------------------------------------------
+
+/// Holds the VT while alive: no console text, keys don't reach the shell.
+/// Dropping it (or a crash/kill) gives the VT back.
+pub struct Vt {
+    _private: (),
+}
+
+impl Vt {
+    /// None when not running on a Linux VT (inside a desktop terminal, or
+    /// with no terminal at all, like under a display manager).
+    pub fn take() -> Option<Self> {
+        #[cfg(feature = "zig-backend")]
+        if unsafe { ffi::pancake_vt_take() } == 0 {
+            return Some(Self { _private: () });
+        }
+        None
+    }
+}
+
+impl Drop for Vt {
+    fn drop(&mut self) {
+        #[cfg(feature = "zig-backend")]
+        unsafe {
+            ffi::pancake_vt_release()
+        }
     }
 }

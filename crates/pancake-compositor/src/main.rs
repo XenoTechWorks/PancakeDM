@@ -1,8 +1,10 @@
 //! PancakeDM compositor. Window management and policy are written in Rust;
 //! the low-level layer (DRM/KMS, input, buffers) is Zig, under `lowlevel/`.
 
+mod cursor;
 mod low;
 
+use cursor::{CursorImage, Pointer};
 use low::{key, InputEvent};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -11,8 +13,8 @@ const USAGE: &str = "\
 usage: pancake-compositor [options]
   --list             list connected screens and exit
   --input            print keyboard/mouse events (Esc quits)
-  --fill RRGGBB      fill every screen with a color (run from a TTY);
-                     Space cycles colors, Esc quits
+  --fill RRGGBB      fill every screen with a color and show the cursor
+                     (run from a TTY); Space cycles colors, Esc quits
   --seconds N        stop after N seconds (default 60, 0 = no limit)
   --device PATH      DRM device (default /dev/dri/card0)
   --version          print versions and exit";
@@ -61,6 +63,9 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Declared before `dev`, so it's dropped after it: screens are restored
+    // first, then the TTY gets its text back.
+    let _vt = if fill.is_some() { low::Vt::take() } else { None };
     let dev = match low::Device::open(device.as_deref()) {
         Ok(d) => d,
         Err(e) => return fail(&e),
@@ -77,7 +82,7 @@ fn main() -> ExitCode {
     }
 
     if let Some(color) = fill {
-        if let Err(e) = run_fill(&dev, outputs.len() as u32, color, deadline) {
+        if let Err(e) = run_fill(&dev, &outputs, color, deadline) {
             return fail(&e);
         }
         // Dropping `dev` puts the old screen contents back.
@@ -85,17 +90,44 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_fill(dev: &low::Device, outputs: u32, color: u32, deadline: Option<Instant>) -> Result<(), String> {
-    let paint = |c: u32| (0..outputs).try_for_each(|i| dev.fill(i, c));
+fn run_fill(dev: &low::Device, outputs: &[low::Output], color: u32, deadline: Option<Instant>) -> Result<(), String> {
+    let count = outputs.len() as u32;
+    let paint = |c: u32| (0..count).try_for_each(|i| dev.fill(i, c));
     paint(color)?;
+
+    // The cursor lives on screen 0 for now; multi-screen layout comes later.
+    let main = &outputs[0];
+    let img = CursorImage::arrow_for(main.height, dev.cursor_size());
+    let mut pointer = Pointer::new(main.width, main.height);
+    let has_cursor = match dev.set_cursor(0, &img) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("pancake-compositor: {e}; running without a cursor");
+            false
+        }
+    };
+    for i in 1..count {
+        dev.hide_cursor(i);
+    }
+    let place = |p: &Pointer| {
+        let (x, y) = p.pixel();
+        dev.move_cursor(0, x, y);
+    };
+    if has_cursor {
+        place(&pointer);
+    }
+
     let input = low::Input::open()?;
     let mut next = 0;
     while !expired(deadline) {
         if !input.wait(100) {
             continue;
         }
+        let before = pointer;
         while let Some(ev) = input.next() {
             match ev {
+                InputEvent::Motion { dx, dy } => pointer.move_by(dx, dy),
+                InputEvent::MotionAbsolute { x, y } => pointer.move_to_fraction(x, y),
                 InputEvent::Key { code: key::ESC, pressed: true } => return Ok(()),
                 InputEvent::Key { code: key::SPACE, pressed: true } => {
                     paint(PALETTE[next])?;
@@ -103,6 +135,10 @@ fn run_fill(dev: &low::Device, outputs: u32, color: u32, deadline: Option<Instan
                 }
                 _ => {}
             }
+        }
+        // One move per batch of events, and only when it actually changed.
+        if has_cursor && pointer.pixel() != before.pixel() {
+            place(&pointer);
         }
     }
     Ok(())

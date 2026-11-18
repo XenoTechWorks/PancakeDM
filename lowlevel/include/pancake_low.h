@@ -27,6 +27,24 @@ int pancake_low_fill(pancake_device *dev, uint32_t index, uint32_t xrgb);
 /* Restore the previous screen contents and close the device. */
 void pancake_low_close(pancake_device *dev);
 
+/* ---- Hardware cursor ---- */
+
+/* Largest cursor image the GPU takes (usually 64x64). */
+void pancake_cursor_size(pancake_device *dev, uint32_t *w, uint32_t *h);
+/* Premultiplied ARGB8888, w*h tightly packed. 0 ok; -3 = no cursor plane. */
+int pancake_cursor_set(pancake_device *dev, uint32_t index, const uint32_t *pixels,
+                       uint32_t w, uint32_t h, int32_t hot_x, int32_t hot_y);
+/* Put the cursor's hotspot at (x, y). */
+int pancake_cursor_move(pancake_device *dev, uint32_t index, int32_t x, int32_t y);
+int pancake_cursor_hide(pancake_device *dev, uint32_t index);
+
+/* ---- Virtual terminal ---- */
+
+/* Take over the VT: no console text, keys don't reach the shell.
+   0 ok, -2 not on a VT (fine). Restored on release, exit, crash or kill. */
+int pancake_vt_take(void);
+void pancake_vt_release(void);
+
 /* ---- Input (libinput) ---- */
 
 typedef void pancake_input;
