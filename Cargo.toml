@@ -21,3 +21,4 @@ wayland-server = "0.31"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "client"] }
 memmap2 = "0.9"
+xkbcommon = "0.8"

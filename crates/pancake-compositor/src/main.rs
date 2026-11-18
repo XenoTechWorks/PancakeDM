@@ -16,8 +16,8 @@ const USAGE: &str = "\
 usage: pancake-compositor [options]
 
 With no options, runs the compositor: apps connect over Wayland
-(WAYLAND_DISPLAY is printed at start). Ctrl+Alt+Backspace quits,
-Ctrl+Alt+F1..F12 switches VT, Space cycles the background color.
+(WAYLAND_DISPLAY is printed at start). Click a window to focus it,
+Alt+drag moves it. Ctrl+Alt+Backspace quits, Ctrl+Alt+F1..F12 switches VT.
 
   --fill RRGGBB      background color (default f4a259)
   --anim             slide a bar across the background (shows any tearing)
@@ -27,8 +27,8 @@ Ctrl+Alt+F1..F12 switches VT, Space cycles the background color.
   --device PATH      DRM device (default /dev/dri/card0)
   --version          print versions and exit";
 
-/// Background colors Space cycles through.
-const PALETTE: [u32; 4] = [0xf4a259, 0x8cb369, 0x5b8e7d, 0xbc4b51];
+/// Default background: pancake gold.
+const DEFAULT_BACKGROUND: u32 = 0xf4a259;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -67,7 +67,7 @@ fn main() -> ExitCode {
     } else if list {
         run_list(device.as_deref())
     } else {
-        run_session(device.as_deref(), fill.unwrap_or(PALETTE[0]), anim, deadline)
+        run_session(device.as_deref(), fill.unwrap_or(DEFAULT_BACKGROUND), anim, deadline)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -114,6 +114,10 @@ impl Mods {
         }
     }
 
+    fn alt(&self) -> bool {
+        self.alt_l || self.alt_r
+    }
+
     fn ctrl_alt(&self) -> bool {
         (self.ctrl_l || self.ctrl_r) && (self.alt_l || self.alt_r)
     }
@@ -153,6 +157,8 @@ fn run_session(device: Option<&str>, color: u32, anim: bool, deadline: Option<In
     let main = &outputs[0];
     let img = CursorImage::placeholder_for(main.height, dev.cursor_size());
     let mut pointer = Pointer::new(main.width, main.height);
+    // Tell the Wayland side where the pointer starts (no motion needed).
+    wl.pointer_motion(pointer.x, pointer.y);
     let setup_cursor = |pointer: &Pointer| -> bool {
         for i in 1..count as u32 {
             dev.hide_cursor(i);
@@ -170,7 +176,7 @@ fn run_session(device: Option<&str>, color: u32, anim: bool, deadline: Option<In
         }
     };
 
-    let mut scene = Scene { color, anim, started: Instant::now() };
+    let scene = Scene { color, anim, started: Instant::now() };
     // Per output: needs a new frame / waiting for the GPU to flip the last one.
     let mut dirty = vec![true; count];
     let mut busy = vec![false; count];
@@ -189,10 +195,9 @@ fn run_session(device: Option<&str>, color: u32, anim: bool, deadline: Option<In
     let mut has_cursor = false;
     let mut first_frame = true;
 
-    // Start after the current color, so the first Space always changes it.
-    let mut next = PALETTE.iter().position(|&c| c == color).map_or(0, |i| (i + 1) % PALETTE.len());
     let mut mods = Mods::default();
     let mut active = true;
+    let debug_input = std::env::var_os("PANCAKE_DEBUG_INPUT").is_some();
 
     while !expired(deadline) {
         // Draw every output that wants a frame and isn't waiting on a flip.
@@ -291,27 +296,49 @@ fn run_session(device: Option<&str>, color: u32, anim: bool, deadline: Option<In
         }
 
         let before = pointer;
+        // Pointer motion is sent to apps once per batch, but always before
+        // a click or scroll so they land where the pointer actually is.
+        let mut sent = pointer;
         while let Some(ev) = input.next() {
+            if debug_input {
+                eprintln!("pancake-compositor: input {ev:?} (pointer at {:.0},{:.0})", pointer.x, pointer.y);
+            }
             match ev {
                 InputEvent::Key { code, pressed } => {
                     mods.update(code, pressed);
-                    if !pressed {
-                        continue;
+                    // Compositor shortcuts first; everything else goes to the app.
+                    if pressed && mods.ctrl_alt() {
+                        if let (Some(n), Some(s)) = (key::function_number(code), &seat) {
+                            s.switch_to(n);
+                            continue;
+                        }
+                        if code == key::BACKSPACE {
+                            return Ok(());
+                        }
                     }
-                    if let (true, Some(n), Some(s)) = (mods.ctrl_alt(), key::function_number(code), &seat) {
-                        s.switch_to(n);
-                    } else if mods.ctrl_alt() && code == key::BACKSPACE {
-                        return Ok(());
-                    } else if code == key::SPACE {
-                        scene.color = PALETTE[next];
-                        next = (next + 1) % PALETTE.len();
-                        dirty.fill(true);
-                    }
+                    wl.key(code, pressed);
                 }
                 InputEvent::Motion { dx, dy } => pointer.move_by(dx, dy),
                 InputEvent::MotionAbsolute { x, y } => pointer.move_to_fraction(x, y),
+                InputEvent::Button { code, pressed } => {
+                    if pointer != sent {
+                        wl.pointer_motion(pointer.x, pointer.y);
+                        sent = pointer;
+                    }
+                    wl.pointer_button(code, pressed, mods.alt());
+                }
+                InputEvent::Scroll { dx, dy } => {
+                    if pointer != sent {
+                        wl.pointer_motion(pointer.x, pointer.y);
+                        sent = pointer;
+                    }
+                    wl.pointer_axis(dx, dy);
+                }
                 _ => {}
             }
+        }
+        if pointer != sent {
+            wl.pointer_motion(pointer.x, pointer.y);
         }
         // One move per batch of events, and only when it actually changed.
         // The cursor plane updates on its own; no new frame needed.

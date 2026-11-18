@@ -7,8 +7,10 @@
 //! Supported so far: wl_compositor, wl_shm, xdg_wm_base (toplevel windows),
 //! plus basic wl_output and wl_seat so common clients start up.
 
+mod seat;
 mod shm;
 
+use seat::{Grab, Keyboard};
 use shm::{BufferData, Pool};
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
@@ -116,6 +118,16 @@ pub struct State {
     output: (u32, u32, u32), // width, height, refresh in mHz
     serial: u32,
     placed_count: i32,
+    started: std::time::Instant,
+    // Input (see seat.rs).
+    keyboard: Option<Keyboard>,
+    keyboards: Vec<WlKeyboard>,
+    pointers: Vec<WlPointer>,
+    kb_focus: Option<WlSurface>,
+    pointer_focus: Option<WlSurface>,
+    pointer_pos: (f64, f64),
+    buttons_down: u32,
+    grab: Option<Grab>,
 }
 
 impl State {
@@ -128,6 +140,17 @@ impl State {
             output: (width, height, refresh_mhz),
             serial: 0,
             placed_count: 0,
+            started: std::time::Instant::now(),
+            keyboard: Keyboard::new()
+                .map_err(|e| eprintln!("pancake-compositor: {e}; apps get no keyboard"))
+                .ok(),
+            keyboards: Vec::new(),
+            pointers: Vec::new(),
+            kb_focus: None,
+            pointer_focus: None,
+            pointer_pos: (0.0, 0.0),
+            buttons_down: 0,
+            grab: None,
         }
     }
 
@@ -174,6 +197,10 @@ impl State {
         win.y = ((oh as i32 - h) / 2).max(0) + step;
         win.placed = true;
         self.placed_count += 1;
+        // A new window gets the keyboard.
+        let surface = win.surface.clone();
+        self.set_keyboard_focus(Some(surface));
+        self.refresh_pointer_focus();
     }
 }
 
@@ -254,6 +281,7 @@ impl Dispatch<WlSurface, Mutex<SurfaceState>> for State {
 
     fn destroyed(state: &mut Self, _: ClientId, surface: &WlSurface, _: &Mutex<SurfaceState>) {
         state.windows.retain(|w| w.surface != *surface);
+        state.forget_surface(surface);
         state.dirty = true;
     }
 }
@@ -324,10 +352,13 @@ impl Dispatch<WlOutput, ()> for State {
 }
 
 impl GlobalDispatch<WlSeat, ()> for State {
-    fn bind(_: &mut Self, _: &DisplayHandle, _: &Client, resource: New<WlSeat>, _: &(), init: &mut DataInit<'_, Self>) {
+    fn bind(state: &mut Self, _: &DisplayHandle, _: &Client, resource: New<WlSeat>, _: &(), init: &mut DataInit<'_, Self>) {
         let seat = init.init(resource, ());
-        // Input to apps comes next; no capabilities yet.
-        seat.capabilities(wl_seat::Capability::empty());
+        let mut caps = wl_seat::Capability::Pointer;
+        if state.keyboard.is_some() {
+            caps |= wl_seat::Capability::Keyboard;
+        }
+        seat.capabilities(caps);
         if seat.version() >= 2 {
             seat.name("seat0".into());
         }
@@ -335,13 +366,15 @@ impl GlobalDispatch<WlSeat, ()> for State {
 }
 
 impl Dispatch<WlSeat, ()> for State {
-    fn request(_: &mut Self, _: &Client, _: &WlSeat, request: wl_seat::Request, _: &(), _: &DisplayHandle, init: &mut DataInit<'_, Self>) {
+    fn request(state: &mut Self, _: &Client, _: &WlSeat, request: wl_seat::Request, _: &(), _: &DisplayHandle, init: &mut DataInit<'_, Self>) {
         match request {
             wl_seat::Request::GetPointer { id } => {
-                init.init(id, ());
+                let p = init.init(id, ());
+                state.pointers.push(p);
             }
             wl_seat::Request::GetKeyboard { id } => {
-                init.init(id, ());
+                let kb = init.init(id, ());
+                state.add_keyboard(kb);
             }
             wl_seat::Request::GetTouch { id } => {
                 init.init(id, ());
@@ -421,10 +454,19 @@ impl Dispatch<XdgSurface, XdgData> for State {
 
 impl Dispatch<XdgToplevel, XdgData> for State {
     fn request(state: &mut Self, _: &Client, toplevel: &XdgToplevel, request: xdg_toplevel::Request, _: &XdgData, _: &DisplayHandle, _: &mut DataInit<'_, Self>) {
-        if let xdg_toplevel::Request::SetTitle { title } = request {
-            if let Some(w) = state.windows.iter_mut().find(|w| w.toplevel == *toplevel) {
-                w.title = title;
+        match request {
+            xdg_toplevel::Request::SetTitle { title } => {
+                if let Some(w) = state.windows.iter_mut().find(|w| w.toplevel == *toplevel) {
+                    w.title = title;
+                }
             }
+            // The app's own title bar was dragged.
+            xdg_toplevel::Request::Move { .. } => {
+                if let Some(i) = state.windows.iter().position(|w| w.toplevel == *toplevel) {
+                    state.start_move(i);
+                }
+            }
+            _ => {}
         }
     }
 

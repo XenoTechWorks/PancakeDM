@@ -5,6 +5,7 @@
 #   tools/qemu/run.sh              build image + boot with a window
 #   tools/qemu/run.sh --headless   no window (screenshots via the monitor)
 #   PANCAKE_ARGS="--fill 5b8e7d" tools/qemu/run.sh   change compositor options
+#   PANCAKE_DEBUG_INPUT=1 tools/qemu/run.sh          log every input event
 #
 # Screenshots, mouse and keys: tools/qemu/vmctl.py (see its --help).
 # Run `make` first. Only one VM at a time.
@@ -69,7 +70,7 @@ cp "$BIN" "$STAGE/usr/bin/pancake-compositor"
 cp "$HELLO" "$STAGE/usr/bin/pancake-hello"
 
 # udev rules (input devices need ID_INPUT tags for libinput) and libinput quirks.
-for d in /usr/lib/udev /etc/udev /usr/share/libinput; do
+for d in /usr/lib/udev /etc/udev /usr/share/libinput /usr/share/X11/xkb; do
     [ -d "$d" ] && { mkdir -p "$STAGE$d"; cp -rL "$d/." "$STAGE$d/"; }
 done
 
@@ -96,6 +97,7 @@ udevd --daemon
 udevadm trigger --action=add
 udevadm settle
 export XDG_RUNTIME_DIR=/run/user/0
+${PANCAKE_DEBUG_INPUT:+export PANCAKE_DEBUG_INPUT=1}
 mkdir -p \$XDG_RUNTIME_DIR
 echo "pancake: starting compositor" >/dev/ttyS0
 (
@@ -123,7 +125,9 @@ echo "==> packing initramfs"
 KVM=
 [ -w /dev/kvm ] && KVM="-enable-kvm -cpu host"
 echo "==> booting (serial log: out/qemu/serial.log)"
-exec qemu-system-x86_64 $KVM -smp 2 -m 1G \
+# vmport=off: a plain PS/2 mouse instead of VMware's VMMouse, whose moves
+# from the monitor (vmctl.py mouse) don't produce motion events.
+exec qemu-system-x86_64 $KVM -machine pc,vmport=off -smp 2 -m 1G \
     -kernel "$KERNEL" -initrd "$OUT/initramfs.gz" \
     -append "rdinit=/init console=ttyS0 console=tty1 quiet loglevel=3" \
     -device virtio-vga \

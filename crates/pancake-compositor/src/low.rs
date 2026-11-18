@@ -266,7 +266,6 @@ impl Device {
 pub mod key {
     pub const ESC: u32 = 1;
     pub const BACKSPACE: u32 = 14;
-    pub const SPACE: u32 = 57;
     pub const LEFTCTRL: u32 = 29;
     pub const RIGHTCTRL: u32 = 97;
     pub const LEFTALT: u32 = 56;

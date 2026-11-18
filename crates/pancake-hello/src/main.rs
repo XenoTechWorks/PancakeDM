@@ -3,23 +3,35 @@
 //! Opens a window using only wl_shm + xdg_shell, and redraws on every
 //! frame callback with a moving progress bar, so you can see that the
 //! compositor shows windows and paces their frames.
+//!
+//! Input test: each key press changes the header color (only when the
+//! window has keyboard focus), and dragging the header moves the window.
 
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::time::Instant;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::{wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface};
+use wayland_client::protocol::{
+    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+};
 use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 const W: u32 = 480;
 const H: u32 = 300;
+const HEADER_HEIGHT: f64 = 64.0;
+const HEADER_COLORS: [u32; 4] = [0xff5b8e7d, 0xff3d5a80, 0xff8e5b7d, 0xff2a9d8f];
 
 struct App {
     configured: bool,
     frame_due: bool,
     buffer_free: bool,
     running: bool,
+    seat: Option<wl_seat::WlSeat>,
+    toplevel: Option<xdg_toplevel::XdgToplevel>,
+    pointer_y: f64,
+    header: usize,
+    focused: bool,
 }
 
 fn main() {
@@ -37,6 +49,7 @@ fn run() -> Result<(), String> {
     let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 1..=4, ()).map_err(|e| format!("wl_compositor: {e}"))?;
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).map_err(|e| format!("wl_shm: {e}"))?;
     let wm_base: xdg_wm_base::XdgWmBase = globals.bind(&qh, 1..=3, ()).map_err(|e| format!("xdg_wm_base: {e}"))?;
+    let seat: Option<wl_seat::WlSeat> = globals.bind(&qh, 1..=5, ()).ok();
 
     let surface = compositor.create_surface(&qh, ());
     let xdg = wm_base.get_xdg_surface(&surface, &qh, ());
@@ -53,13 +66,24 @@ fn run() -> Result<(), String> {
     let pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
     let buffer = pool.create_buffer(0, W as i32, H as i32, (W * 4) as i32, wl_shm::Format::Argb8888, &qh, ());
 
-    let mut app = App { configured: false, frame_due: true, buffer_free: true, running: true };
+    let mut app = App {
+        configured: false,
+        frame_due: true,
+        buffer_free: true,
+        running: true,
+        seat,
+        toplevel: Some(toplevel.clone()),
+        pointer_y: 0.0,
+        header: 0,
+        focused: false,
+    };
     let start = Instant::now();
     let mut frames = 0u64;
     while app.running {
         queue.blocking_dispatch(&mut app).map_err(|e| e.to_string())?;
         if app.configured && app.frame_due && app.buffer_free {
-            draw(&mut mem, start.elapsed().as_secs_f32());
+            let header = if app.focused { HEADER_COLORS[app.header] } else { 0xff9aa5a0 };
+            draw(&mut mem, start.elapsed().as_secs_f32(), header);
             surface.attach(Some(&buffer), 0, 0);
             surface.damage_buffer(0, 0, W as i32, H as i32);
             surface.frame(&qh, ());
@@ -87,10 +111,10 @@ fn shm_file(size: u64) -> Result<File, String> {
 }
 
 /// A rounded card with a header strip and a progress bar that loops.
-fn draw(mem: &mut [u8], t: f32) {
+/// The header is grey without keyboard focus.
+fn draw(mem: &mut [u8], t: f32, header: u32) {
     const RADIUS: f32 = 18.0;
     const CARD: u32 = 0xfffff3e3;
-    const HEADER: u32 = 0xff5b8e7d;
     const TRACK: u32 = 0xffe8d9c4;
     const BAR: u32 = 0xffbc4b51;
     let progress = (t / 3.0).fract();
@@ -98,7 +122,7 @@ fn draw(mem: &mut [u8], t: f32) {
     for y in 0..H {
         for x in 0..W {
             let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let mut px = if fy < 64.0 { HEADER } else { CARD };
+            let mut px = if (fy as f64) < HEADER_HEIGHT { header } else { CARD };
             if (bar_y0..bar_y1).contains(&fy) && (bar_x0..bar_x1).contains(&fx) {
                 let filled = bar_x0 + (bar_x1 - bar_x0) * progress;
                 px = if fx < filled { BAR } else { TRACK };
@@ -165,6 +189,55 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for App {
     fn event(app: &mut Self, _: &wl_buffer::WlBuffer, event: wl_buffer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let wl_buffer::Event::Release = event {
             app.buffer_free = true;
+        }
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for App {
+    fn event(_: &mut Self, seat: &wl_seat::WlSeat, event: wl_seat::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
+        if let wl_seat::Event::Capabilities { capabilities: wayland_client::WEnum::Value(caps) } = event {
+            if caps.contains(wl_seat::Capability::Pointer) {
+                seat.get_pointer(qh, ());
+            }
+            if caps.contains(wl_seat::Capability::Keyboard) {
+                seat.get_keyboard(qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for App {
+    fn event(app: &mut Self, _: &wl_pointer::WlPointer, event: wl_pointer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        match event {
+            wl_pointer::Event::Enter { surface_x, surface_y, .. } => {
+                eprintln!("pancake-hello: pointer entered at {surface_x:.0},{surface_y:.0}");
+                app.pointer_y = surface_y;
+            }
+            wl_pointer::Event::Motion { surface_y, .. } => app.pointer_y = surface_y,
+            wl_pointer::Event::Button { serial, state: wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed), .. } => {
+                eprintln!("pancake-hello: click at y={:.0}", app.pointer_y);
+                // Drag by the header: ask the compositor to move us.
+                if app.pointer_y < HEADER_HEIGHT {
+                    if let (Some(tl), Some(seat)) = (&app.toplevel, &app.seat) {
+                        tl._move(seat, serial);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
+    fn event(app: &mut Self, _: &wl_keyboard::WlKeyboard, event: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        match event {
+            wl_keyboard::Event::Enter { .. } => app.focused = true,
+            wl_keyboard::Event::Leave { .. } => app.focused = false,
+            wl_keyboard::Event::Key { key, state: wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => {
+                app.header = (app.header + 1) % HEADER_COLORS.len();
+                eprintln!("pancake-hello: key {key}");
+            }
+            _ => {}
         }
     }
 }

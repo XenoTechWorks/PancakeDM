@@ -3,7 +3,8 @@
 
   vmctl.py shot [name]        screenshot -> out/screenshots/<date>/<name>.png
   vmctl.py mouse DX DY        move the mouse by DX, DY
-  vmctl.py key KEY            press a key (QEMU names: spc, esc, a, ...)
+  vmctl.py key KEY            press a key (QEMU names: spc, esc, a, alt-a, ...)
+  vmctl.py button N           set mouse buttons: 1 = left down, 0 = all up
   vmctl.py quit               power off the VM
 
 Uses only the Python standard library.
@@ -79,6 +80,8 @@ def main(a):
         shot(a[1] if len(a) > 1 else None)
     elif a[0] == "mouse":
         monitor(f"mouse_move {int(a[1])} {int(a[2])}")
+    elif a[0] == "button":
+        monitor(f"mouse_button {int(a[1])}")
     elif a[0] == "key":
         monitor("sendkey " + a[1])
     elif a[0] == "quit":
