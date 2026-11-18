@@ -56,6 +56,13 @@ impl Pointer {
         Self { x: w / 2.0, y: h / 2.0, width: w, height: h }
     }
 
+    /// The screen changed size: keep the pointer on it.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width as f64;
+        self.height = height as f64;
+        self.move_by(0.0, 0.0);
+    }
+
     pub fn move_by(&mut self, dx: f64, dy: f64) {
         self.x = (self.x + dx).clamp(0.0, self.width - 1.0);
         self.y = (self.y + dy).clamp(0.0, self.height - 1.0);

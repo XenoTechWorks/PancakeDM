@@ -180,6 +180,15 @@ impl State {
         }
     }
 
+    pub fn window_titles(&self) -> Vec<String> {
+        self.windows.iter().map(|w| w.title.clone()).collect()
+    }
+
+    pub fn set_output_size(&mut self, width: u32, height: u32) {
+        self.output.0 = width;
+        self.output.1 = height;
+    }
+
     /// First time a window has content: center it, cascading later ones.
     fn place_window(&mut self, surface: &WlSurface) {
         let (ow, oh, _) = self.output;

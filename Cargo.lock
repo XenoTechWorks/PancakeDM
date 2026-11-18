@@ -74,6 +74,7 @@ dependencies = [
  "memmap2",
  "pancake-config",
  "pancake-ipc",
+ "wayland-client",
  "wayland-protocols",
  "wayland-server",
  "xkbcommon",

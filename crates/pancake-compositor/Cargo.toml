@@ -9,6 +9,7 @@ license.workspace = true
 pancake-config.workspace = true
 pancake-ipc.workspace = true
 wayland-server.workspace = true
+wayland-client.workspace = true
 wayland-protocols.workspace = true
 memmap2.workspace = true
 xkbcommon.workspace = true

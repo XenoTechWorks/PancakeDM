@@ -35,6 +35,15 @@ impl<'a> Canvas<'a> {
 }
 
 impl Canvas<'_> {
+    /// Copy of the visible pixels, tightly packed (for screenshots).
+    pub fn snapshot(&self) -> (u32, u32, Vec<u32>) {
+        let mut out = Vec::with_capacity((self.width * self.height) as usize);
+        for y in 0..self.height as usize {
+            out.extend_from_slice(&self.pixels[y * self.stride..y * self.stride + self.width as usize]);
+        }
+        (self.width, self.height, out)
+    }
+
     /// Draw a `w` x `h` image (premultiplied ARGB, tightly packed) with its
     /// top-left at (x, y), clipped to the canvas. `opaque` skips blending.
     pub fn blit(&mut self, x: i32, y: i32, w: u32, h: u32, src: &[u32], opaque: bool) {
@@ -80,6 +89,61 @@ fn blend(src: u32, dst: u32) -> u32 {
         ((s + (d * inv + 127) / 255).min(255)) << shift
     };
     0xff00_0000 | ch(16) | ch(8) | ch(0)
+}
+
+/// Write XRGB pixels as a PNG. Uses uncompressed deflate blocks, so it
+/// needs no compression library; files are big but always valid.
+pub fn write_png(path: &std::path::Path, w: u32, h: u32, px: &[u32]) -> std::io::Result<()> {
+    let mut raw = Vec::with_capacity((w * h * 3 + h) as usize);
+    for y in 0..h as usize {
+        raw.push(0); // filter: none
+        for &p in &px[y * w as usize..(y + 1) * w as usize] {
+            raw.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+        }
+    }
+    // zlib stream made of stored blocks.
+    let mut z = vec![0x78, 0x01];
+    let mut chunks = raw.chunks(65535).peekable();
+    while let Some(c) = chunks.next() {
+        z.push(chunks.peek().is_none() as u8);
+        let len = c.len() as u16;
+        z.extend_from_slice(&len.to_le_bytes());
+        z.extend_from_slice(&(!len).to_le_bytes());
+        z.extend_from_slice(c);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for &byte in data {
+            c ^= byte as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    };
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &z);
+    chunk(b"IEND", &[]);
+    std::fs::write(path, out)
 }
 
 /// What --fill shows: a background color, plus with --anim a bar sliding
@@ -158,6 +222,17 @@ mod tests {
         // 50% black over white: about half grey.
         let g = blend(0x8000_0000, 0xffff_ffff) & 0xff;
         assert!((126..=128).contains(&g), "{g}");
+    }
+
+    #[test]
+    fn png_has_valid_structure() {
+        let dir = std::env::temp_dir().join(format!("pancake-png-test-{}", std::process::id()));
+        write_png(&dir, 2, 2, &[0xff0000, 0x00ff00, 0x0000ff, 0xffffff]).unwrap();
+        let data = std::fs::read(&dir).unwrap();
+        let _ = std::fs::remove_file(&dir);
+        assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&data[12..16], b"IHDR");
+        assert_eq!(&data[data.len() - 8..data.len() - 4], b"IEND");
     }
 
     #[test]
