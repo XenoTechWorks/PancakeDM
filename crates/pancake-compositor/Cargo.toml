@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 pancake-config.workspace = true
 pancake-ipc.workspace = true
+wayland-server.workspace = true
+wayland-protocols.workspace = true
+memmap2.workspace = true
 
 [features]
 # Link the Zig low-level layer (build it first: cd lowlevel && zig build)

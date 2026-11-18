@@ -265,6 +265,7 @@ impl Device {
 /// evdev key codes we care about so far.
 pub mod key {
     pub const ESC: u32 = 1;
+    pub const BACKSPACE: u32 = 14;
     pub const SPACE: u32 = 57;
     pub const LEFTCTRL: u32 = 29;
     pub const RIGHTCTRL: u32 = 97;

@@ -18,7 +18,8 @@ OUT=$ROOT/out/qemu
 STAGE=$OUT/root
 BIN=$ROOT/target/release/pancake-compositor
 DISPLAY_OPT="-display gtk,zoom-to-fit=on"
-PANCAKE_ARGS=${PANCAKE_ARGS:---fill f4a259 --anim --seconds 0}
+PANCAKE_ARGS=${PANCAKE_ARGS:-}
+HELLO=$ROOT/target/release/pancake-hello
 [ "${1:-}" = --headless ] && DISPLAY_OPT="-display none"
 
 [ -x "$BIN" ] || { echo "run 'make' first" >&2; exit 1; }
@@ -62,9 +63,10 @@ copy_bin() {
 
 copy_bin "$(command -v sh)" "$(command -v mount)" "$(command -v sleep)" \
     "$(command -v kmod)" "$(command -v udevd)" "$(command -v udevadm)" \
-    "$(command -v setsid)" "$(command -v cat)" "$(command -v mkdir)" "$BIN"
+    "$(command -v setsid)" "$(command -v cat)" "$(command -v mkdir)" "$BIN" "$HELLO"
 ln -sf kmod "$STAGE/usr/bin/modprobe"
 cp "$BIN" "$STAGE/usr/bin/pancake-compositor"
+cp "$HELLO" "$STAGE/usr/bin/pancake-hello"
 
 # udev rules (input devices need ID_INPUT tags for libinput) and libinput quirks.
 for d in /usr/lib/udev /etc/udev /usr/share/libinput; do
@@ -96,10 +98,20 @@ udevadm settle
 export XDG_RUNTIME_DIR=/run/user/0
 mkdir -p \$XDG_RUNTIME_DIR
 echo "pancake: starting compositor" >/dev/ttyS0
+(
+    while :; do
+        setsid -c sh -c 'pancake-compositor $PANCAKE_ARGS' \
+            </dev/tty1 >/dev/tty1 2>/dev/ttyS0
+        echo "pancake: compositor exited (\$?), restarting in 2s" >/dev/ttyS0
+        sleep 2
+    done
+) &
+# Then a test app inside it.
+sleep 3
+export WAYLAND_DISPLAY=wayland-1
 while :; do
-    setsid -c sh -c 'pancake-compositor $PANCAKE_ARGS' \
-        </dev/tty1 >/dev/tty1 2>/dev/ttyS0
-    echo "pancake: compositor exited (\$?), restarting in 2s" >/dev/ttyS0
+    pancake-hello 2>/dev/ttyS0
+    echo "pancake: pancake-hello exited (\$?), restarting in 2s" >/dev/ttyS0
     sleep 2
 done
 INIT

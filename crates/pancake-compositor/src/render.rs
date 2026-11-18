@@ -34,6 +34,54 @@ impl<'a> Canvas<'a> {
     }
 }
 
+impl Canvas<'_> {
+    /// Draw a `w` x `h` image (premultiplied ARGB, tightly packed) with its
+    /// top-left at (x, y), clipped to the canvas. `opaque` skips blending.
+    pub fn blit(&mut self, x: i32, y: i32, w: u32, h: u32, src: &[u32], opaque: bool) {
+        if src.len() < (w * h) as usize {
+            return;
+        }
+        // Visible part of the image, in image coordinates.
+        let sx0 = (-x).max(0) as u32;
+        let sx1 = w.min((self.width as i32 - x).max(0) as u32);
+        let sy0 = (-y).max(0) as u32;
+        let sy1 = h.min((self.height as i32 - y).max(0) as u32);
+        if sx0 >= sx1 || sy0 >= sy1 {
+            return;
+        }
+        for sy in sy0..sy1 {
+            let src_row = &src[(sy * w + sx0) as usize..(sy * w + sx1) as usize];
+            let d = (y + sy as i32) as usize * self.stride + (x + sx0 as i32) as usize;
+            let dst_row = &mut self.pixels[d..d + src_row.len()];
+            if opaque {
+                dst_row.copy_from_slice(src_row);
+            } else {
+                for (d, &s) in dst_row.iter_mut().zip(src_row) {
+                    *d = blend(s, *d);
+                }
+            }
+        }
+    }
+}
+
+/// Premultiplied "over": src + dst * (1 - src alpha).
+fn blend(src: u32, dst: u32) -> u32 {
+    let a = src >> 24;
+    if a == 255 {
+        return src;
+    }
+    if a == 0 {
+        return dst;
+    }
+    let inv = 255 - a;
+    let ch = |shift: u32| {
+        let s = (src >> shift) & 0xff;
+        let d = (dst >> shift) & 0xff;
+        ((s + (d * inv + 127) / 255).min(255)) << shift
+    };
+    0xff00_0000 | ch(16) | ch(8) | ch(0)
+}
+
 /// What --fill shows: a background color, plus with --anim a bar sliding
 /// across. Tearing would show up as the bar breaking into offset pieces.
 pub struct Scene {
@@ -85,6 +133,31 @@ mod tests {
         let mut px = vec![0u32; 5 * 2];
         Canvas::new(&mut px, 5, 3, 2).clear(9);
         assert_eq!(px, vec![9, 9, 9, 0, 0, 9, 9, 9, 0, 0]);
+    }
+
+    #[test]
+    fn blit_clips_at_every_edge() {
+        let mut px = vec![0u32; 4 * 4];
+        let img = vec![5u32; 3 * 3];
+        let mut c = Canvas::new(&mut px, 4, 4, 4);
+        c.blit(-1, -1, 3, 3, &img, true); // top-left, partly off screen
+        c.blit(3, 3, 3, 3, &img, true); // bottom-right, partly off screen
+        c.blit(10, 10, 3, 3, &img, true); // fully off screen: no panic
+        assert_eq!(px, vec![
+            5, 5, 0, 0,
+            5, 5, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 5,
+        ]);
+    }
+
+    #[test]
+    fn blend_is_premultiplied_over() {
+        assert_eq!(blend(0xff11_2233, 0xffff_ffff), 0xff11_2233); // opaque wins
+        assert_eq!(blend(0x0000_0000, 0xff44_5566), 0xff44_5566); // clear keeps dst
+        // 50% black over white: about half grey.
+        let g = blend(0x8000_0000, 0xffff_ffff) & 0xff;
+        assert!((126..=128).contains(&g), "{g}");
     }
 
     #[test]

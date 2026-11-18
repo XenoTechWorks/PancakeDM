@@ -4,6 +4,7 @@
 mod cursor;
 mod low;
 mod render;
+mod wayland;
 
 use cursor::{CursorImage, Pointer};
 use low::{key, InputEvent};
@@ -13,22 +14,25 @@ use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
 usage: pancake-compositor [options]
+
+With no options, runs the compositor: apps connect over Wayland
+(WAYLAND_DISPLAY is printed at start). Ctrl+Alt+Backspace quits,
+Ctrl+Alt+F1..F12 switches VT, Space cycles the background color.
+
+  --fill RRGGBB      background color (default f4a259)
+  --anim             slide a bar across the background (shows any tearing)
+  --seconds N        quit after N seconds (default: never)
   --list             list connected screens and exit
-  --input            print keyboard/mouse events (Esc quits)
-  --fill RRGGBB      fill every screen with a color and show the cursor
-                     (run from a TTY); Space cycles colors, Esc quits,
-                     Ctrl+Alt+F1..F12 switches VT
-  --anim             with --fill: slide a bar across (shows any tearing)
-  --seconds N        stop after N seconds (default 60, 0 = no limit)
+  --input            print keyboard/mouse events and exit on Esc
   --device PATH      DRM device (default /dev/dri/card0)
   --version          print versions and exit";
 
-/// Colors Space cycles through in --fill.
+/// Background colors Space cycles through.
 const PALETTE: [u32; 4] = [0xf4a259, 0x8cb369, 0x5b8e7d, 0xbc4b51];
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let (mut list, mut input, mut fill, mut seconds, mut device) = (false, false, None, 60u64, None);
+    let (mut list, mut input, mut fill, mut seconds, mut device) = (false, false, None, 0u64, None);
     let mut anim = false;
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -58,15 +62,12 @@ fn main() -> ExitCode {
     }
     let deadline = (seconds > 0).then(|| Instant::now() + Duration::from_secs(seconds));
 
-    let result = if let Some(color) = fill {
-        run_fill(device.as_deref(), color, anim, deadline)
-    } else if input {
+    let result = if input {
         run_input(deadline)
     } else if list {
         run_list(device.as_deref())
     } else {
-        println!("{USAGE}");
-        Ok(())
+        run_session(device.as_deref(), fill.unwrap_or(PALETTE[0]), anim, deadline)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -118,7 +119,7 @@ impl Mods {
     }
 }
 
-fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Instant>) -> Result<(), String> {
+fn run_session(device: Option<&str>, color: u32, anim: bool, deadline: Option<Instant>) -> Result<(), String> {
     // Drop order is the reverse of this: input and screens are released
     // first, then the VT, then the seat.
     let seat = low::Seat::open();
@@ -141,6 +142,12 @@ fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Insta
     print_outputs(&outputs);
     let input = low::Input::open(seat.as_ref())?;
     let count = outputs.len();
+
+    // Apps get screen 0's size for now.
+    let mut server = wayland::Server::new()?;
+    let mut wl = wayland::State::new(outputs[0].width, outputs[0].height, outputs[0].refresh_mhz);
+    let wl_display_fd = server.display_fd();
+    eprintln!("pancake-compositor: WAYLAND_DISPLAY={}", server.name);
 
     // The cursor lives on screen 0 for now; multi-screen layout comes later.
     let main = &outputs[0];
@@ -167,6 +174,18 @@ fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Insta
     // Per output: needs a new frame / waiting for the GPU to flip the last one.
     let mut dirty = vec![true; count];
     let mut busy = vec![false; count];
+    // Some GPUs (QEMU's virtio-gpu) finish flips instantly instead of at
+    // vblank. Never start frames closer together than 3/4 of a refresh, so
+    // we and the apps don't spin at thousands of fps. On real hardware the
+    // flip itself is the limit and this never kicks in.
+    let min_gap: Vec<Duration> = outputs
+        .iter()
+        .map(|o| {
+            let hz = if o.refresh_mhz > 0 { o.refresh_mhz as f64 / 1000.0 } else { 60.0 };
+            Duration::from_secs_f64(0.75 / hz)
+        })
+        .collect();
+    let mut last_frame = vec![Instant::now() - Duration::from_secs(1); count];
     let mut has_cursor = false;
     let mut first_frame = true;
 
@@ -179,16 +198,21 @@ fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Insta
         // Draw every output that wants a frame and isn't waiting on a flip.
         if active {
             for i in 0..count {
-                if !dirty[i] || busy[i] {
+                if !dirty[i] || busy[i] || last_frame[i].elapsed() < min_gap[i] {
                     continue;
                 }
+                last_frame[i] = Instant::now();
                 let Some(mut canvas) = dev.begin_frame(i as u32)? else {
                     busy[i] = true;
                     continue;
                 };
                 scene.draw(&mut canvas);
+                wl.draw(&mut canvas);
                 let shown_now = dev.commit_frame(i as u32)?;
                 busy[i] = !shown_now;
+                if shown_now {
+                    wl.frame_done(scene.started.elapsed().as_millis() as u32);
+                }
                 // A frame shown by modeset gets no flip event, so when
                 // animating, queue the next frame here instead.
                 dirty[i] = shown_now && scene.anim;
@@ -200,14 +224,33 @@ fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Insta
             }
         }
 
-        let mut fds = vec![input.fd(), dev.fd()];
+        // Fixed slots: 0 input, 1 GPU, 2 Wayland clients, 3 new clients, 4 seat.
+        let mut fds = vec![input.fd(), dev.fd(), wl_display_fd, server.socket_fd()];
         if let Some(s) = &seat {
             fds.push(s.fd());
         }
-        let ready = low::wait(&fds, 100);
+        server.flush();
+        // Wake up in time for a frame that's only waiting on the pacing gap.
+        let timeout = (0..count)
+            .filter(|&i| active && dirty[i] && !busy[i])
+            .map(|i| min_gap[i].saturating_sub(last_frame[i].elapsed()).as_millis() as i32 + 1)
+            .min()
+            .unwrap_or(100);
+        let ready = low::wait(&fds, timeout);
+
+        if ready[3] {
+            server.accept();
+        }
+        if ready[2] {
+            server.dispatch(&mut wl);
+        }
 
         if ready[1] {
             let landed = dev.dispatch();
+            if landed != 0 {
+                // Our frame is on screen: apps may draw their next one.
+                wl.frame_done(scene.started.elapsed().as_millis() as u32);
+            }
             for i in 0..count {
                 if landed & (1 << i) != 0 {
                     busy[i] = false;
@@ -220,7 +263,7 @@ fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Insta
             }
         }
 
-        if let (Some(s), Some(true)) = (&seat, ready.get(2)) {
+        if let (Some(s), Some(true)) = (&seat, ready.get(4)) {
             let ev = s.dispatch();
             if ev.disabled {
                 // Switched away: let go of everything, then tell the seat.
@@ -238,6 +281,11 @@ fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Insta
                 first_frame = true;
             }
         }
+        // An app committed new content (or a window went away): redraw.
+        if wl.dirty {
+            wl.dirty = false;
+            dirty.fill(true);
+        }
         if !active || !ready[0] {
             continue;
         }
@@ -252,7 +300,7 @@ fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Insta
                     }
                     if let (true, Some(n), Some(s)) = (mods.ctrl_alt(), key::function_number(code), &seat) {
                         s.switch_to(n);
-                    } else if code == key::ESC {
+                    } else if mods.ctrl_alt() && code == key::BACKSPACE {
                         return Ok(());
                     } else if code == key::SPACE {
                         scene.color = PALETTE[next];
