@@ -270,6 +270,8 @@ pub mod key {
     pub const RIGHTCTRL: u32 = 97;
     pub const LEFTALT: u32 = 56;
     pub const RIGHTALT: u32 = 100;
+    pub const LEFTMETA: u32 = 125;
+    pub const RIGHTMETA: u32 = 126;
 
     /// F1..F12 -> 1..12.
     pub fn function_number(code: u32) -> Option<i32> {

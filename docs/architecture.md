@@ -96,7 +96,31 @@ shapes are its own code, text is rasterized with `fontdue` from the font
 socket (`windows` and `focus ID`, encoded by `pancake-ipc`).
 
 The compositor also supports other layer-shell clients (wallpapers,
-docks, launchers) in all four layers.
+docks, launchers) in all four layers. Layer surfaces in the top or
+overlay layer that ask for exclusive keyboard interactivity get the
+keyboard while they're shown.
+
+## The launcher
+
+`pancake-launcher` opens from the panel's Pancake button or a tap of
+Super (both go through the compositor's `launcher` command, which opens
+it or closes it if it's open). It's a full-screen overlay: the desktop
+dims and a card shows a search box over a grid of apps.
+
+Apps come from `.desktop` files in `$XDG_DATA_HOME`, `$XDG_DATA_DIRS`
+and the Flatpak export folders; hidden and NoDisplay entries are skipped
+and user entries override system ones. Typing searches (names starting
+with the text first, then names with a word starting with it, then
+anywhere in the name or command). Arrows move, Enter or a click opens,
+Esc or a click outside closes. Tiles show a colored letter badge for now;
+real icons come later.
+
+Programs the compositor starts get `WAYLAND_DISPLAY`, `PANCAKE_SOCKET`,
+`XDG_CURRENT_DESKTOP=Pancake`, and no `DISPLAY`, so apps opened from the
+launcher join this session even when nested in another desktop.
+
+The shell programs share `pancake-draw`: the palette, anti-aliased
+shapes, text, and small shm/poll helpers.
 
 ## Nested mode (development)
 
@@ -109,6 +133,7 @@ WAYLAND_DISPLAY=wayland-N nautilus           # in another terminal
 pancake-compositor msg screenshot /tmp/a.png # PNG of what PancakeDM drew
 pancake-compositor msg windows               # open windows (id, focused, title)
 pancake-compositor msg focus ID              # raise and focus a window
+pancake-compositor msg launcher              # open/close the launcher
 pancake-compositor msg quit
 ```
 

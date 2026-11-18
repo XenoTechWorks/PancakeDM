@@ -29,6 +29,8 @@ pub struct Layer {
     size: (u32, u32),
     zone: i32,
     margin: (i32, i32, i32, i32), // top, right, bottom, left
+    /// 0 none, 1 exclusive (takes the keyboard while shown), 2 on demand.
+    keyboard: u32,
     configured: bool,
     /// Where it is on screen, once arranged.
     pub rect: (i32, i32, i32, i32),
@@ -123,6 +125,7 @@ impl Dispatch<ZwlrLayerShellV1, ()> for State {
                 size: (0, 0),
                 zone: 0,
                 margin: (0, 0, 0, 0),
+                keyboard: 0,
                 configured: false,
                 rect: (0, 0, 0, 0),
             });
@@ -140,6 +143,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerData> for State {
             zwlr_layer_surface_v1::Request::SetExclusiveZone { zone } => l.zone = zone,
             zwlr_layer_surface_v1::Request::SetMargin { top, right, bottom, left } => l.margin = (top, right, bottom, left),
             zwlr_layer_surface_v1::Request::SetLayer { layer: WEnum::Value(v) } => l.layer = v as u32,
+            zwlr_layer_surface_v1::Request::SetKeyboardInteractivity { keyboard_interactivity: WEnum::Value(k) } => l.keyboard = k as u32,
             _ => {}
         }
     }
@@ -155,8 +159,13 @@ impl State {
     /// A layer surface committed: (re)arrange so its new size, anchor or
     /// zone take effect, and configure it if needed.
     pub(super) fn layer_commit(&mut self, surface: &WlSurface) {
-        if self.layers.iter().any(|l| l.surface == *surface) {
-            self.arrange_layers();
+        let Some(l) = self.layers.iter().find(|l| l.surface == *surface) else { return };
+        // Overlays like the launcher take the keyboard once they're showing;
+        // it goes back to the top window when they close (forget_surface).
+        let grabs = l.keyboard == 1 && l.layer >= TOP && super::surface_size(surface).0 > 0;
+        self.arrange_layers();
+        if grabs && self.kb_focus.as_ref() != Some(surface) {
+            self.set_keyboard_focus(Some(surface.clone()));
         }
     }
 }

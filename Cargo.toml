@@ -7,6 +7,8 @@ members = [
     "crates/pancake-panel",
     "crates/pancake-settings",
     "crates/pancake-hello",
+    "crates/pancake-draw",
+    "crates/pancake-launcher",
 ]
 
 [workspace.package]
@@ -17,6 +19,7 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 pancake-config = { path = "crates/pancake-config" }
 pancake-ipc = { path = "crates/pancake-ipc" }
+pancake-draw = { path = "crates/pancake-draw" }
 wayland-server = "0.31"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "client"] }

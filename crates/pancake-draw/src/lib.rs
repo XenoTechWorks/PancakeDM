@@ -1,5 +1,8 @@
-//! Tiny 2D drawing for the panel: anti-aliased rounded rectangles and
-//! text, into a premultiplied ARGB8888 buffer.
+//! Shared pieces for PancakeDM's shell programs (panel, launcher, ...):
+//! anti-aliased rounded rectangles and text into a premultiplied ARGB8888
+//! buffer, the color palette, and small Wayland/system helpers.
+//!
+//! Everything is drawn by hand; there's no toolkit.
 
 use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
@@ -66,6 +69,58 @@ impl Fonts {
         out.push('…');
         out
     }
+}
+
+/// The PancakeDM palette (straight alpha 0xAARRGGBB).
+pub mod color {
+    pub const GLASS: u32 = 0xe61f1a17; // warm near-black glass
+    pub const GLASS_EDGE: u32 = 0x22ffffff;
+    pub const TEXT: u32 = 0xfff6eee3;
+    pub const TEXT_DIM: u32 = 0xb3f6eee3;
+    pub const TEXT_FAINT: u32 = 0x66f6eee3;
+    pub const GOLD: u32 = 0xfff4a259;
+    pub const GOLD_DARK: u32 = 0xffc9792f;
+    pub const ON_GOLD: u32 = 0xff2a1d12;
+    pub const SUBTLE: u32 = 0x1affffff;
+    pub const SUBTLE_HOVER: u32 = 0x2effffff;
+    /// Warm, distinct colors for things like app badges.
+    pub const ACCENTS: [u32; 8] =
+        [0xffbc4b51, 0xff5b8e7d, 0xff8cb369, 0xfff4a259, 0xff3d5a80, 0xff8e5b7d, 0xff2a9d8f, 0xffc9792f];
+}
+
+/// An unlinked, mapped file in XDG_RUNTIME_DIR for wl_shm buffers.
+pub fn shm_file(size: u64, tag: &str) -> Result<(std::fs::File, memmap2::MmapMut), String> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR isn't set")?;
+    let path = std::path::Path::new(&dir).join(format!("pancake-{tag}-{}", std::process::id()));
+    let file = std::fs::File::options().read(true).write(true).create(true).truncate(true).open(&path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&path);
+    file.set_len(size).map_err(|e| e.to_string())?;
+    let mem = unsafe { memmap2::MmapMut::map_mut(&file) }.map_err(|e| e.to_string())?;
+    Ok((file, mem))
+}
+
+/// View a mapped buffer as pixels.
+pub fn pixels(mem: &mut memmap2::MmapMut) -> &mut [u32] {
+    let len = mem.len() / 4;
+    // Safety: mmap'd memory is page-aligned, so it's aligned for u32.
+    unsafe { std::slice::from_raw_parts_mut(mem.as_mut_ptr() as *mut u32, len) }
+}
+
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+extern "C" {
+    fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+}
+
+/// Wait up to `timeout_ms` for `fd` to become readable.
+pub fn wait_readable(fd: i32, timeout_ms: i32) -> bool {
+    let mut p = PollFd { fd, events: 1, revents: 0 };
+    unsafe { poll(&mut p, 1, timeout_ms) > 0 && p.revents != 0 }
 }
 
 pub struct Canvas<'a> {

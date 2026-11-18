@@ -22,7 +22,8 @@ usage: pancake-compositor [options]
 With no options, runs the compositor: apps connect over Wayland
 (WAYLAND_DISPLAY is printed at start). Inside another Wayland desktop it
 opens as a window (nested); from a TTY it takes the real screens.
-Click a window to focus it, Alt+drag moves it. Ctrl+Alt+Backspace quits,
+Click a window to focus it, Alt+drag moves it. Tap Super (or click
+Pancake in the panel) for the app launcher. Ctrl+Alt+Backspace quits,
 Ctrl+Alt+F1..F12 switches VT.
 
   --drm              use the real screens even inside a Wayland desktop
@@ -35,7 +36,8 @@ Ctrl+Alt+F1..F12 switches VT.
   --device PATH      DRM device (default /dev/dri/card0)
   --version          print versions and exit
 
-msg commands (to a running compositor): screenshot PATH, windows, focus ID, quit";
+msg commands (to a running compositor): screenshot PATH, windows, focus ID,
+launcher, quit";
 
 /// Default background: pancake gold.
 const DEFAULT_BACKGROUND: u32 = 0xf4a259;
@@ -123,17 +125,29 @@ fn run_list(device: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Ctrl and Alt state, for compositor shortcuts.
+/// Ctrl, Alt and Super state, for compositor shortcuts.
 #[derive(Default)]
 struct Mods {
     ctrl_l: bool,
     ctrl_r: bool,
     alt_l: bool,
     alt_r: bool,
+    meta: bool,
+    /// Super went down and nothing else happened yet: a tap, if released now.
+    meta_alone: bool,
 }
 
 impl Mods {
-    fn update(&mut self, code: u32, pressed: bool) {
+    /// Returns true when this event completes a Super tap.
+    fn update(&mut self, code: u32, pressed: bool) -> bool {
+        let is_meta = code == key::LEFTMETA || code == key::RIGHTMETA;
+        let tap = is_meta && !pressed && self.meta_alone;
+        if is_meta {
+            self.meta = pressed;
+            self.meta_alone = pressed;
+        } else if pressed {
+            self.meta_alone = false;
+        }
         match code {
             key::LEFTCTRL => self.ctrl_l = pressed,
             key::RIGHTCTRL => self.ctrl_r = pressed,
@@ -141,6 +155,7 @@ impl Mods {
             key::RIGHTALT => self.alt_r = pressed,
             _ => {}
         }
+        tap
     }
 
     fn alt(&self) -> bool {
@@ -176,9 +191,14 @@ impl Drop for Child {
 fn spawn_shell_program(name: &str, wayland_display: &str, socket: &std::path::Path) -> Option<Child> {
     let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name))).filter(|p| p.exists());
     let program = beside.unwrap_or_else(|| std::path::PathBuf::from(name));
+    // Children (and the apps they start) belong to this session, not to
+    // whatever desktop we might be nested in.
     match std::process::Command::new(&program)
         .env("WAYLAND_DISPLAY", wayland_display)
         .env("PANCAKE_SOCKET", socket)
+        .env("XDG_CURRENT_DESKTOP", "Pancake")
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env_remove("DISPLAY")
         .spawn()
     {
         Ok(c) => Some(Child(c)),
@@ -202,6 +222,13 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, d
     let ipc = ipc::Ipc::bind(&server.name)?;
     eprintln!("pancake-compositor: PANCAKE_SOCKET={}", ipc.path().display());
     let _panel = if panel { spawn_shell_program("pancake-panel", &server.name, ipc.path()) } else { None };
+    let mut launcher: Option<Child> = None;
+    // Open the launcher, or close it if it's open.
+    let session_name = server.name.clone();
+    let toggle_launcher = |launcher: &mut Option<Child>| {
+        let running = launcher.as_mut().is_some_and(|c| matches!(c.0.try_wait(), Ok(None)));
+        *launcher = if running { None } else { spawn_shell_program("pancake-launcher", &session_name, ipc.path()) };
+    };
 
     // The pointer lives on screen 0 for now; multi-screen layout comes later.
     let mut pointer = Pointer::new(outputs[0].width, outputs[0].height);
@@ -294,6 +321,10 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, d
                         let ok = wl.focus_window(id);
                         ipc::reply(stream, if ok { "ok" } else { "error no such window" });
                     }
+                    ipc::Command::Launcher => {
+                        toggle_launcher(&mut launcher);
+                        ipc::reply(stream, "ok");
+                    }
                     ipc::Command::Quit => {
                         ipc::reply(stream, "ok");
                         return Ok(());
@@ -348,7 +379,9 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, d
                     }
                     match ev {
                         InputEvent::Key { code, pressed } => {
-                            mods.update(code, pressed);
+                            if mods.update(code, pressed) {
+                                toggle_launcher(&mut launcher);
+                            }
                             // Compositor shortcuts first; everything else goes to the app.
                             if pressed && mods.ctrl_alt() {
                                 if let Some(n) = key::function_number(code) {
@@ -364,6 +397,7 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, d
                         InputEvent::Motion { dx, dy } => pointer.move_by(dx, dy),
                         InputEvent::MotionAbsolute { x, y } => pointer.move_to_fraction(x, y),
                         InputEvent::Button { code, pressed } => {
+                            mods.meta_alone = false; // Super+click isn't a tap
                             if pointer != sent {
                                 wl.pointer_motion(pointer.x, pointer.y);
                                 sent = pointer;

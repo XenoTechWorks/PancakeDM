@@ -5,12 +5,10 @@
 //! one to focus it), and the clock. Drawn by hand, no toolkit. Window info
 //! comes from the compositor's control socket.
 
-mod draw;
-
 use chrono::Local;
-use draw::{Canvas, Fonts};
 use memmap2::MmapMut;
-use std::fs::File;
+use pancake_draw::color::*;
+use pancake_draw::{Canvas, Fonts};
 use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -22,16 +20,6 @@ const BAR_HEIGHT: u32 = 40;
 const MARGIN: i32 = 8;
 const RADIUS: f32 = 14.0;
 
-// Colors (straight alpha).
-const BAR_BG: u32 = 0xe61f1a17; // warm near-black glass
-const BAR_EDGE: u32 = 0x22ffffff;
-const TEXT: u32 = 0xfff6eee3;
-const TEXT_DIM: u32 = 0xb3f6eee3;
-const GOLD: u32 = 0xfff4a259;
-const GOLD_DARK: u32 = 0xffc9792f;
-const PILL: u32 = 0x1affffff;
-const PILL_HOVER: u32 = 0x2effffff;
-const PILL_TEXT_ON_GOLD: u32 = 0xff2a1d12;
 
 struct App {
     configured: bool,
@@ -45,7 +33,12 @@ struct App {
 /// Clickable things drawn this frame.
 struct Hit {
     rect: (f32, f32, f32, f32),
-    window: u32,
+    target: Target,
+}
+
+enum Target {
+    Launcher,
+    Window(u32),
 }
 
 fn main() {
@@ -88,7 +81,10 @@ fn run() -> Result<(), String> {
         if let Some((x, y)) = app.clicked.take() {
             let (x, y) = (x as f32, y as f32);
             if let Some(h) = hits.iter().find(|h| x >= h.rect.0 && x < h.rect.0 + h.rect.2 && y >= h.rect.1 && y < h.rect.1 + h.rect.3) {
-                let _ = pancake_ipc::send(&format!("focus {}", h.window));
+                let _ = match h.target {
+                    Target::Launcher => pancake_ipc::send("launcher"),
+                    Target::Window(id) => pancake_ipc::send(&format!("focus {id}")),
+                };
                 last_poll = Instant::now() - Duration::from_secs(10);
             }
         }
@@ -110,8 +106,7 @@ fn run() -> Result<(), String> {
                 app.buffer_free = [true; 2];
             }
             if let Some(i) = (0..2).find(|&i| app.buffer_free[i]) {
-                let mem = &mut bufs[i].1;
-                let px = unsafe { std::slice::from_raw_parts_mut(mem.as_mut_ptr() as *mut u32, (w * h) as usize) };
+                let px = pancake_draw::pixels(&mut bufs[i].1);
                 let mut canvas = Canvas { px, w: w as i32, h: h as i32 };
                 hits = draw_bar(&mut canvas, &mut fonts, &windows, app.pointer);
                 surface.attach(Some(&bufs[i].0), 0, 0);
@@ -125,9 +120,7 @@ fn run() -> Result<(), String> {
         conn.flush().map_err(|e| e.to_string())?;
         // Wake for input, the next poll of the window list, or the next minute.
         if let Some(guard) = queue.prepare_read() {
-            let mut pfd = PollFd { fd, events: 1, revents: 0 };
-            unsafe { poll(&mut pfd, 1, 250) };
-            if pfd.revents != 0 {
+            if pancake_draw::wait_readable(fd, 250) {
                 guard.read().map_err(|e| e.to_string())?;
             }
         }
@@ -136,25 +129,9 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-#[repr(C)]
-struct PollFd {
-    fd: i32,
-    events: i16,
-    revents: i16,
-}
-
-extern "C" {
-    fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
-}
-
 fn make_buffer(shm: &wl_shm::WlShm, qh: &QueueHandle<App>, w: u32, h: u32, i: usize) -> Result<(wl_buffer::WlBuffer, MmapMut, (u32, u32)), String> {
     let size = (w * h * 4) as u64;
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR isn't set")?;
-    let path = std::path::Path::new(&dir).join(format!("pancake-panel-{}-{i}", std::process::id()));
-    let file = File::options().read(true).write(true).create(true).truncate(true).open(&path).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&path);
-    file.set_len(size).map_err(|e| e.to_string())?;
-    let mem = unsafe { MmapMut::map_mut(&file) }.map_err(|e| e.to_string())?;
+    let (file, mem) = pancake_draw::shm_file(size, &format!("panel-{i}"))?;
     let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
     let buffer = pool.create_buffer(0, w as i32, h as i32, (w * 4) as i32, wl_shm::Format::Argb8888, qh, i);
     pool.destroy();
@@ -166,13 +143,23 @@ fn draw_bar(c: &mut Canvas, fonts: &mut Fonts, windows: &[pancake_ipc::WindowInf
     let (w, h) = (c.w as f32, c.h as f32);
     c.clear();
     // Glass bar with a faint light edge.
-    c.rounded_rect(0.0, 0.0, w, h, RADIUS, BAR_EDGE);
-    c.rounded_rect(1.0, 1.0, w - 2.0, h - 2.0, RADIUS - 1.0, BAR_BG);
+    c.rounded_rect(0.0, 0.0, w, h, RADIUS, GLASS_EDGE);
+    c.rounded_rect(1.0, 1.0, w - 2.0, h - 2.0, RADIUS - 1.0, GLASS);
 
     let mid = h / 2.0;
     let baseline = mid + 5.0;
 
-    // The Pancake button: a little golden pancake and the name.
+    // The Pancake button (opens the launcher): a golden pancake and the name.
+    let mut hits = Vec::new();
+    let button_w = 38.0 + fonts.width("Pancake", 15.0, true) + 12.0;
+    let button = (4.0, mid - 15.0, button_w, 30.0);
+    if pointer.is_some_and(|(px, py)| {
+        let (px, py) = (px as f32, py as f32);
+        px >= button.0 && px < button.0 + button.2 && py >= button.1 && py < button.1 + button.3
+    }) {
+        c.rounded_rect(button.0, button.1, button.2, button.3, 11.0, SUBTLE);
+    }
+    hits.push(Hit { rect: button, target: Target::Launcher });
     c.circle(22.0, mid, 9.0, GOLD_DARK);
     c.circle(22.0, mid - 1.0, 7.5, GOLD);
     c.circle(19.5, mid - 3.5, 2.0, 0x55ffffff); // a bit of shine
@@ -180,7 +167,6 @@ fn draw_bar(c: &mut Canvas, fonts: &mut Fonts, windows: &[pancake_ipc::WindowInf
     x += c.text(fonts, "Pancake", x, baseline, 15.0, true, TEXT) + 18.0;
 
     // Window pills.
-    let mut hits = Vec::new();
     let pill_h = 28.0;
     let max_title = 180.0;
     for win in windows {
@@ -196,13 +182,13 @@ fn draw_bar(c: &mut Canvas, fonts: &mut Fonts, windows: &[pancake_ipc::WindowInf
             px >= rect.0 && px < rect.0 + rect.2 && py >= rect.1 && py < rect.1 + rect.3
         });
         let (bg, fg) = match (win.focused, hover) {
-            (true, _) => (GOLD, PILL_TEXT_ON_GOLD),
-            (false, true) => (PILL_HOVER, TEXT),
-            (false, false) => (PILL, TEXT_DIM),
+            (true, _) => (GOLD, ON_GOLD),
+            (false, true) => (SUBTLE_HOVER, TEXT),
+            (false, false) => (SUBTLE, TEXT_DIM),
         };
         c.rounded_rect(rect.0, rect.1, rect.2, rect.3, 10.0, bg);
         c.text(fonts, &title, x + 12.0, baseline - 0.5, 13.0, win.focused, fg);
-        hits.push(Hit { rect, window: win.id });
+        hits.push(Hit { rect, target: Target::Window(win.id) });
         x += pw + 6.0;
     }
 

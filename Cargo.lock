@@ -258,6 +258,14 @@ name = "pancake-config"
 version = "0.1.0"
 
 [[package]]
+name = "pancake-draw"
+version = "0.1.0"
+dependencies = [
+ "fontdue",
+ "memmap2",
+]
+
+[[package]]
 name = "pancake-hello"
 version = "0.1.0"
 dependencies = [
@@ -271,13 +279,25 @@ name = "pancake-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "pancake-launcher"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+ "pancake-draw",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "xkbcommon",
+]
+
+[[package]]
 name = "pancake-panel"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "fontdue",
  "memmap2",
  "pancake-config",
+ "pancake-draw",
  "pancake-ipc",
  "wayland-client",
  "wayland-protocols",

@@ -1,0 +1,10 @@
+[package]
+name = "pancake-draw"
+description = "Shared drawing and Wayland helpers for PancakeDM shell programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fontdue.workspace = true
+memmap2.workspace = true
