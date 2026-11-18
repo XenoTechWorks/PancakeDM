@@ -81,6 +81,24 @@ Variables you can override: `PREFIX`, `BINDIR`, `DATADIR`, `DESTDIR`,
 `JOBS` (default 2), `PROFILE` (default `release`) and `ZIG_BACKEND`
 (`auto`, `yes` or `no`).
 
+## Nested mode (development)
+
+Started from inside another Wayland desktop, `pancake-compositor` opens
+as a window there and apps can connect to it, with no TTY or VM needed:
+
+```sh
+./target/release/pancake-compositor          # prints WAYLAND_DISPLAY=wayland-N
+WAYLAND_DISPLAY=wayland-N nautilus           # in another terminal
+pancake-compositor msg screenshot /tmp/a.png # PNG of what PancakeDM drew
+pancake-compositor msg windows               # open window titles
+pancake-compositor msg quit
+```
+
+`--drm` forces real screens even inside a desktop. Each compositor has a
+control socket at `$XDG_RUNTIME_DIR/pancake-<wayland-N>.sock`;
+`msg` finds it through `PANCAKE_SOCKET`, `WAYLAND_DISPLAY`, or by being
+the only one running.
+
 ## Testing in QEMU
 
 `tools/qemu/run.sh` boots PancakeDM in a VM made from the host's own
