@@ -1,7 +1,7 @@
 //! Input for apps: keyboard focus with an xkb keymap, pointer focus,
 //! clicks, scrolling, and moving windows (Alt+drag, or the app asking).
 
-use super::{State, Window};
+use super::{same_client, State};
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -57,41 +57,20 @@ pub struct Grab {
     dy: i32,
 }
 
-fn same_client(a: &impl Resource, b: &impl Resource) -> bool {
-    a.id().same_client_as(&b.id())
-}
-
-impl Window {
-    fn size(&self) -> (i32, i32) {
-        self.surface
-            .data::<std::sync::Mutex<super::SurfaceState>>()
-            .map(|d| {
-                let s = d.lock().unwrap();
-                (s.width as i32, s.height as i32)
-            })
-            .unwrap_or((0, 0))
-    }
-
-    fn contains(&self, x: f64, y: f64) -> bool {
-        let (w, h) = self.size();
-        self.placed && w > 0 && x >= self.x as f64 && y >= self.y as f64 && x < (self.x + w) as f64 && y < (self.y + h) as f64
-    }
-}
-
 impl State {
     pub(super) fn time_ms(&self) -> u32 {
         self.started.elapsed().as_millis() as u32
     }
 
-    /// Topmost window under (x, y).
-    fn window_at(&self, x: f64, y: f64) -> Option<usize> {
-        self.windows.iter().rposition(|w| w.contains(x, y))
-    }
-
+    /// Bring a window (and any popups) to the front.
     fn raise(&mut self, i: usize) {
         if i + 1 != self.windows.len() {
             let w = self.windows.remove(i);
             self.windows.push(w);
+            // Popups stay above every window.
+            let (popups, rest): (Vec<_>, Vec<_>) = self.windows.drain(..).partition(|w| w.popup.is_some());
+            self.windows = rest;
+            self.windows.extend(popups);
             self.dirty = true;
         }
     }
@@ -122,6 +101,17 @@ impl State {
         if self.kb_focus == surface {
             return;
         }
+        // Tell the old and new windows whether they're active.
+        let old_root = self.kb_focus.as_ref().and_then(|s| self.root_window(s));
+        let new_root = surface.as_ref().and_then(|s| self.root_window(s));
+        if old_root != new_root {
+            if let Some(i) = old_root {
+                self.send_activated(i, false);
+            }
+            if let Some(i) = new_root {
+                self.send_activated(i, true);
+            }
+        }
         self.keyboards.retain(|k| k.is_alive());
         let serial = self.next_serial();
         if let Some(old) = self.kb_focus.take() {
@@ -137,6 +127,7 @@ impl State {
             }
         }
         self.kb_focus = surface;
+        self.send_selection();
     }
 
     /// A key the compositor didn't keep for itself.
@@ -183,10 +174,7 @@ impl State {
             }
             return;
         }
-        let target = self.window_at(x, y).map(|i| {
-            let w = &self.windows[i];
-            (w.surface.clone(), x - w.x as f64, y - w.y as f64)
-        });
+        let target = self.window_at(x, y).map(|(_, s, sx, sy)| (s, sx, sy));
         let time = self.time_ms();
         match target {
             Some((surface, sx, sy)) if Some(&surface) == self.pointer_focus.as_ref() => {
@@ -231,12 +219,17 @@ impl State {
             return;
         }
         if pressed {
-            // Click to focus and raise.
             let (x, y) = self.pointer_pos;
-            if let Some(i) = self.window_at(x, y) {
+            let hit = self.window_at(x, y).map(|(i, ..)| i);
+            // A click outside the open menus closes them.
+            if hit.map_or(true, |i| self.windows[i].popup.is_none()) {
+                self.dismiss_popups();
+            }
+            // Click to focus and raise (toplevels; menus keep their own focus).
+            if let Some(i) = hit.filter(|&i| self.windows[i].toplevel.is_some()) {
+                let surface = self.windows[i].surface.clone();
                 self.raise(i);
-                let top = self.windows.len() - 1;
-                let surface = self.windows[top].surface.clone();
+                let top = self.windows.iter().position(|w| w.surface == surface).unwrap();
                 self.set_keyboard_focus(Some(surface));
                 if alt && code == BTN_LEFT {
                     self.start_move(top);
@@ -278,8 +271,8 @@ impl State {
 
     /// Start dragging window `i` with the pointer.
     pub(super) fn start_move(&mut self, i: usize) {
-        if self.buttons_down == 0 {
-            return; // only while a button is held
+        if self.buttons_down == 0 || self.windows[i].toplevel.is_none() {
+            return; // only toplevels, only while a button is held
         }
         let (x, y) = self.pointer_pos;
         let w = &self.windows[i];
@@ -305,7 +298,7 @@ impl State {
         }
         if self.kb_focus.as_ref() == Some(surface) {
             self.kb_focus = None;
-            let top = self.windows.iter().rev().find(|w| w.placed && w.surface != *surface).map(|w| w.surface.clone());
+            let top = self.windows.iter().rev().find(|w| w.placed && w.toplevel.is_some() && w.surface != *surface).map(|w| w.surface.clone());
             self.set_keyboard_focus(top);
         }
         self.refresh_pointer_focus();

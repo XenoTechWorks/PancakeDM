@@ -4,23 +4,23 @@
 //! crates (message encoding and the socket); everything the compositor
 //! actually does with windows is ours.
 //!
-//! Supported so far: wl_compositor, wl_shm, xdg_wm_base (toplevel windows),
-//! plus basic wl_output and wl_seat so common clients start up.
+//! Supported: wl_compositor, wl_subcompositor, wl_shm, wl_output, wl_seat
+//! (pointer + keyboard), wl_data_device_manager (copy/paste), xdg_wm_base
+//! (windows and popups).
 
+mod data;
 mod seat;
 mod shm;
+mod subsurface;
+mod xdg;
 
 use seat::{Grab, Keyboard};
 use shm::{BufferData, Pool};
+use subsurface::Sub;
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
-use wayland_protocols::xdg::shell::server::{
-    xdg_popup::{self, XdgPopup},
-    xdg_positioner::{self, XdgPositioner},
-    xdg_surface::{self, XdgSurface},
-    xdg_toplevel::{self, XdgToplevel},
-    xdg_wm_base::{self, XdgWmBase},
-};
+use wayland_protocols::xdg::shell::server::{xdg_popup::XdgPopup, xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase};
+use wayland_server::protocol::{wl_data_device::WlDataDevice, wl_data_device_manager::WlDataDeviceManager, wl_data_source::WlDataSource, wl_subcompositor::WlSubcompositor};
 use wayland_server::backend::{ClientData, ClientId};
 use wayland_server::protocol::{
     wl_buffer::{self, WlBuffer},
@@ -54,6 +54,8 @@ impl Server {
         let display = Display::<State>::new().map_err(|e| format!("can't start Wayland: {e:?}"))?;
         let dh = display.handle();
         dh.create_global::<State, WlCompositor, ()>(5, ());
+        dh.create_global::<State, WlSubcompositor, ()>(1, ());
+        dh.create_global::<State, WlDataDeviceManager, ()>(3, ());
         dh.create_global::<State, WlShm, ()>(1, ());
         dh.create_global::<State, WlOutput, ()>(3, ());
         dh.create_global::<State, WlSeat, ()>(5, ());
@@ -62,6 +64,10 @@ impl Server {
             .map_err(|e| format!("can't create the Wayland socket: {e:?}"))?;
         let name = socket.socket_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         Ok(Self { display, socket, name })
+    }
+
+    pub fn handle(&self) -> DisplayHandle {
+        self.display.handle()
     }
 
     /// Readable when connected clients sent requests.
@@ -96,14 +102,44 @@ impl Server {
 struct ClientState;
 impl ClientData for ClientState {}
 
-/// A toplevel app window.
+/// Two resources belong to the same app.
+fn same_client(a: &impl Resource, b: &impl Resource) -> bool {
+    a.id().same_client_as(&b.id())
+}
+
+/// An app window (toplevel) or menu (popup).
 struct Window {
     surface: WlSurface,
-    toplevel: XdgToplevel,
+    xdg: XdgSurface,
+    toplevel: Option<XdgToplevel>,
+    popup: Option<XdgPopup>,
+    /// Popups: the surface they hang off; x, y are then relative to the
+    /// parent's window geometry. Toplevels: x, y are screen coordinates
+    /// of the surface's top-left.
+    parent: Option<WlSurface>,
     title: String,
     x: i32,
     y: i32,
+    /// The "real" window inside the surface, without drop shadows
+    /// (xdg_surface.set_window_geometry).
+    geometry: Option<(i32, i32, i32, i32)>,
     placed: bool,
+}
+
+impl Window {
+    fn new(surface: WlSurface, xdg: XdgSurface, toplevel: Option<XdgToplevel>, popup: Option<XdgPopup>, parent: Option<WlSurface>) -> Self {
+        Self { surface, xdg, toplevel, popup, parent, title: String::new(), x: 0, y: 0, geometry: None, placed: false }
+    }
+}
+
+fn surface_size(surface: &WlSurface) -> (i32, i32) {
+    surface
+        .data::<Mutex<SurfaceState>>()
+        .map(|d| {
+            let s = d.lock().unwrap();
+            (s.width as i32, s.height as i32)
+        })
+        .unwrap_or((0, 0))
 }
 
 /// Everything the protocol handlers read and change.
@@ -128,10 +164,15 @@ pub struct State {
     pointer_pos: (f64, f64),
     buttons_down: u32,
     grab: Option<Grab>,
+    subsurfaces: Vec<Sub>,
+    // Clipboard (see data.rs).
+    dh: Option<DisplayHandle>,
+    data_devices: Vec<WlDataDevice>,
+    selection: Option<WlDataSource>,
 }
 
 impl State {
-    pub fn new(width: u32, height: u32, refresh_mhz: u32) -> Self {
+    pub fn new(dh: DisplayHandle, width: u32, height: u32, refresh_mhz: u32) -> Self {
         Self {
             windows: Vec::new(),
             frame_callbacks: Vec::new(),
@@ -151,6 +192,10 @@ impl State {
             pointer_pos: (0.0, 0.0),
             buttons_down: 0,
             grab: None,
+            subsurfaces: Vec::new(),
+            dh: Some(dh),
+            data_devices: Vec::new(),
+            selection: None,
         }
     }
 
@@ -163,13 +208,89 @@ impl State {
     /// drew now ride along with this frame until it's on screen.
     pub fn draw(&mut self, canvas: &mut Canvas) {
         self.in_flight.append(&mut self.frame_callbacks);
-        for w in &self.windows {
-            let Some(data) = w.surface.data::<Mutex<SurfaceState>>() else { continue };
-            let s = data.lock().unwrap();
-            if s.width > 0 {
-                canvas.blit(w.x, w.y, s.width, s.height, &s.pixels, s.opaque);
+        for i in 0..self.windows.len() {
+            if self.windows[i].placed {
+                let (x, y) = self.origin(i);
+                self.draw_tree(canvas, &self.windows[i].surface, x, y, 0);
             }
         }
+    }
+
+    /// A surface and its subsurfaces, with the surface's top-left at (x, y).
+    fn draw_tree(&self, canvas: &mut Canvas, surface: &WlSurface, x: i32, y: i32, depth: u32) {
+        if depth > 8 {
+            return;
+        }
+        for sub in self.subsurfaces.iter().filter(|s| s.parent == *surface && !s.above) {
+            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, depth + 1);
+        }
+        if let Some(data) = surface.data::<Mutex<SurfaceState>>() {
+            let s = data.lock().unwrap();
+            if s.width > 0 {
+                canvas.blit(x, y, s.width, s.height, &s.pixels, s.opaque);
+            }
+        }
+        for sub in self.subsurfaces.iter().filter(|s| s.parent == *surface && s.above) {
+            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, depth + 1);
+        }
+    }
+
+    /// Topmost surface in a tree under (px, py), with coordinates local to it.
+    fn hit_tree(&self, surface: &WlSurface, x: i32, y: i32, px: f64, py: f64, depth: u32) -> Option<(WlSurface, f64, f64)> {
+        if depth > 8 {
+            return None;
+        }
+        let children: Vec<&Sub> = self.subsurfaces.iter().filter(|s| s.parent == *surface).collect();
+        for sub in children.iter().rev().filter(|s| s.above) {
+            if let Some(hit) = self.hit_tree(&sub.surface, x + sub.x, y + sub.y, px, py, depth + 1) {
+                return Some(hit);
+            }
+        }
+        let (w, h) = surface_size(surface);
+        let (lx, ly) = (px - x as f64, py - y as f64);
+        if w > 0 && lx >= 0.0 && ly >= 0.0 && lx < w as f64 && ly < h as f64 {
+            return Some((surface.clone(), lx, ly));
+        }
+        for sub in children.iter().rev().filter(|s| !s.above) {
+            if let Some(hit) = self.hit_tree(&sub.surface, x + sub.x, y + sub.y, px, py, depth + 1) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Topmost window under (x, y): its index, and the exact surface hit
+    /// (maybe a subsurface) with coordinates local to that surface.
+    fn window_at(&self, x: f64, y: f64) -> Option<(usize, WlSurface, f64, f64)> {
+        (0..self.windows.len()).rev().filter(|&i| self.windows[i].placed).find_map(|i| {
+            let (ox, oy) = self.origin(i);
+            self.hit_tree(&self.windows[i].surface, ox, oy, x, y, 0).map(|(s, lx, ly)| (i, s, lx, ly))
+        })
+    }
+
+    /// Offset of the window geometry inside the surface (shadow size).
+    fn geom_offset(&self, i: usize) -> (i32, i32) {
+        self.windows[i].geometry.map_or((0, 0), |(x, y, _, _)| (x, y))
+    }
+
+    /// Screen position of window `i`'s surface top-left. Popups follow
+    /// their parent, so they move with it.
+    fn origin(&self, i: usize) -> (i32, i32) {
+        let mut idx = i;
+        let (mut x, mut y) = (0, 0);
+        for _ in 0..16 {
+            let w = &self.windows[idx];
+            let Some(p) = w.parent.as_ref().and_then(|p| self.windows.iter().position(|o| o.surface == *p)) else {
+                return (x + w.x, y + w.y);
+            };
+            // Popup: relative to the parent's geometry, minus our own shadow.
+            let (gx, gy) = self.geom_offset(p);
+            let (sx, sy) = self.geom_offset(idx);
+            x += w.x + gx - sx;
+            y += w.y + gy - sy;
+            idx = p;
+        }
+        (x, y)
     }
 
     /// The frame we drew is on screen: tell those apps to draw their next one.
@@ -181,7 +302,7 @@ impl State {
     }
 
     pub fn window_titles(&self) -> Vec<String> {
-        self.windows.iter().map(|w| w.title.clone()).collect()
+        self.windows.iter().filter(|w| w.toplevel.is_some()).map(|w| w.title.clone()).collect()
     }
 
     pub fn set_output_size(&mut self, width: u32, height: u32) {
@@ -190,20 +311,19 @@ impl State {
     }
 
     /// First time a window has content: center it, cascading later ones.
+    /// Centering uses the window geometry, so drop shadows don't count.
     fn place_window(&mut self, surface: &WlSurface) {
         let (ow, oh, _) = self.output;
-        let Some(i) = self.windows.iter().position(|w| w.surface == *surface && !w.placed) else { return };
-        let (w, h) = {
-            let s = surface.data::<Mutex<SurfaceState>>().unwrap().lock().unwrap();
-            if s.width == 0 {
-                return;
-            }
-            (s.width as i32, s.height as i32)
-        };
+        let Some(i) = self.windows.iter().position(|w| w.surface == *surface && !w.placed && w.toplevel.is_some()) else { return };
+        let (w, h) = surface_size(surface);
+        if w == 0 {
+            return;
+        }
+        let (gx, gy, gw, gh) = self.windows[i].geometry.unwrap_or((0, 0, w, h));
         let step = 32 * (self.placed_count % 8);
         let win = &mut self.windows[i];
-        win.x = ((ow as i32 - w) / 2).max(0) + step;
-        win.y = ((oh as i32 - h) / 2).max(0) + step;
+        win.x = ((ow as i32 - gw) / 2).max(0) - gx + step;
+        win.y = ((oh as i32 - gh) / 2).max(0) - gy + step;
         win.placed = true;
         self.placed_count += 1;
         // A new window gets the keyboard.
@@ -290,6 +410,7 @@ impl Dispatch<WlSurface, Mutex<SurfaceState>> for State {
 
     fn destroyed(state: &mut Self, _: ClientId, surface: &WlSurface, _: &Mutex<SurfaceState>) {
         state.windows.retain(|w| w.surface != *surface);
+        state.subsurfaces.retain(|s| s.surface != *surface && s.parent != *surface);
         state.forget_surface(surface);
         state.dirty = true;
     }
@@ -403,88 +524,3 @@ impl Dispatch<WlTouch, ()> for State {
     fn request(_: &mut Self, _: &Client, _: &WlTouch, _: wl_touch::Request, _: &(), _: &DisplayHandle, _: &mut DataInit<'_, Self>) {}
 }
 
-// ---- xdg_shell ---------------------------------------------------------------
-
-/// The wl_surface an xdg_surface / toplevel / popup belongs to.
-pub struct XdgData {
-    surface: WlSurface,
-}
-
-impl GlobalDispatch<XdgWmBase, ()> for State {
-    fn bind(_: &mut Self, _: &DisplayHandle, _: &Client, resource: New<XdgWmBase>, _: &(), init: &mut DataInit<'_, Self>) {
-        init.init(resource, ());
-    }
-}
-
-impl Dispatch<XdgWmBase, ()> for State {
-    fn request(_: &mut Self, _: &Client, _: &XdgWmBase, request: xdg_wm_base::Request, _: &(), _: &DisplayHandle, init: &mut DataInit<'_, Self>) {
-        match request {
-            xdg_wm_base::Request::GetXdgSurface { id, surface } => {
-                init.init(id, XdgData { surface });
-            }
-            xdg_wm_base::Request::CreatePositioner { id } => {
-                init.init(id, ());
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<XdgPositioner, ()> for State {
-    fn request(_: &mut Self, _: &Client, _: &XdgPositioner, _: xdg_positioner::Request, _: &(), _: &DisplayHandle, _: &mut DataInit<'_, Self>) {}
-}
-
-impl Dispatch<XdgSurface, XdgData> for State {
-    fn request(state: &mut Self, _: &Client, xdg: &XdgSurface, request: xdg_surface::Request, data: &XdgData, _: &DisplayHandle, init: &mut DataInit<'_, Self>) {
-        match request {
-            xdg_surface::Request::GetToplevel { id } => {
-                let toplevel = init.init(id, XdgData { surface: data.surface.clone() });
-                state.windows.push(Window {
-                    surface: data.surface.clone(),
-                    toplevel: toplevel.clone(),
-                    title: String::new(),
-                    x: 0,
-                    y: 0,
-                    placed: false,
-                });
-                // Let the app pick its own size for now (0x0), then map.
-                toplevel.configure(0, 0, Vec::new());
-                let serial = state.next_serial();
-                xdg.configure(serial);
-            }
-            xdg_surface::Request::GetPopup { id, .. } => {
-                // Popups (menus) aren't shown yet.
-                init.init(id, XdgData { surface: data.surface.clone() });
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<XdgToplevel, XdgData> for State {
-    fn request(state: &mut Self, _: &Client, toplevel: &XdgToplevel, request: xdg_toplevel::Request, _: &XdgData, _: &DisplayHandle, _: &mut DataInit<'_, Self>) {
-        match request {
-            xdg_toplevel::Request::SetTitle { title } => {
-                if let Some(w) = state.windows.iter_mut().find(|w| w.toplevel == *toplevel) {
-                    w.title = title;
-                }
-            }
-            // The app's own title bar was dragged.
-            xdg_toplevel::Request::Move { .. } => {
-                if let Some(i) = state.windows.iter().position(|w| w.toplevel == *toplevel) {
-                    state.start_move(i);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn destroyed(state: &mut Self, _: ClientId, toplevel: &XdgToplevel, _: &XdgData) {
-        state.windows.retain(|w| w.toplevel != *toplevel);
-        state.dirty = true;
-    }
-}
-
-impl Dispatch<XdgPopup, XdgData> for State {
-    fn request(_: &mut Self, _: &Client, _: &XdgPopup, _: xdg_popup::Request, _: &XdgData, _: &DisplayHandle, _: &mut DataInit<'_, Self>) {}
-}

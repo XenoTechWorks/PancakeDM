@@ -166,7 +166,7 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, deadline: Opti
 
     // Apps get screen 0's size for now.
     let mut server = wayland::Server::new()?;
-    let mut wl = wayland::State::new(outputs[0].width, outputs[0].height, outputs[0].refresh_mhz);
+    let mut wl = wayland::State::new(server.handle(), outputs[0].width, outputs[0].height, outputs[0].refresh_mhz);
     let wl_display_fd = server.display_fd();
     eprintln!("pancake-compositor: WAYLAND_DISPLAY={}", server.name);
     let ipc = ipc::Ipc::bind(&server.name)?;
