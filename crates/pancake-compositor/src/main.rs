@@ -118,7 +118,8 @@ fn run_fill(dev: &low::Device, outputs: &[low::Output], color: u32, deadline: Op
     }
 
     let input = low::Input::open()?;
-    let mut next = 0;
+    // Start after the current color, so the first Space always changes it.
+    let mut next = PALETTE.iter().position(|&c| c == color).map_or(0, |i| (i + 1) % PALETTE.len());
     while !expired(deadline) {
         if !input.wait(100) {
             continue;

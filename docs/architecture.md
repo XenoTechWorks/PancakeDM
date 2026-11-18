@@ -58,3 +58,21 @@ make clean
 Variables you can override: `PREFIX`, `BINDIR`, `DATADIR`, `DESTDIR`,
 `JOBS` (default 2), `PROFILE` (default `release`) and `ZIG_BACKEND`
 (`auto`, `yes` or `no`).
+
+## Testing in QEMU
+
+`tools/qemu/run.sh` boots PancakeDM in a VM made from the host's own
+kernel, udev and libraries, so nothing gets downloaded. Run `make` first.
+
+```sh
+tools/qemu/run.sh               # boot with a window
+tools/qemu/run.sh --headless    # no window
+tools/qemu/vmctl.py shot NAME   # screenshot -> out/screenshots/<date>/NAME.png
+tools/qemu/vmctl.py key spc     # send a key
+tools/qemu/vmctl.py mouse 50 0  # move the mouse
+tools/qemu/vmctl.py quit        # power off
+```
+
+The serial log is in `out/qemu/serial.log`. QEMU screenshots don't include
+the hardware cursor (it's on its own plane), so check the cursor in the
+window instead.
