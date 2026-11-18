@@ -28,5 +28,6 @@ Early planning. Nothing to install yet.
 
 ## Building
 
-See [docs/architecture.md](docs/architecture.md). In short: most code is
+Run `make`, then `make install`. See [docs/architecture.md](docs/architecture.md)
+for details. Most code is
 Rust (one Cargo workspace), the low-level layer is Zig.

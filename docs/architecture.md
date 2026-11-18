@@ -33,8 +33,18 @@ when it's available and seatd otherwise.
 
 ## Building
 
+PancakeDM uses a plain POSIX `Makefile` that drives Cargo and Zig, so it
+works with GNU make, bmake or busybox make.
+
 ```sh
-cargo build                                   # Rust only
-cd lowlevel && zig build && cd ..             # Zig low-level layer
-cargo build --features pancake-compositor/zig-backend   # link them
+make                       # build everything (links Zig if `zig` is installed)
+make check                 # cargo check + tests, plus zig build if available
+make run                   # run the compositor from the build tree
+make PREFIX=/usr DESTDIR="$pkgdir" install   # for packagers
+make uninstall
+make clean
 ```
+
+Variables you can override: `PREFIX`, `BINDIR`, `DATADIR`, `DESTDIR`,
+`JOBS` (default 2), `PROFILE` (default `release`) and `ZIG_BACKEND`
+(`auto`, `yes` or `no`).
