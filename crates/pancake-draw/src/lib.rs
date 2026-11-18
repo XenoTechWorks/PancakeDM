@@ -6,7 +6,6 @@
 
 pub mod accent;
 pub mod apps;
-pub mod logo;
 pub mod icons;
 pub mod images;
 

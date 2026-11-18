@@ -260,6 +260,9 @@ fn run() -> Result<(), String> {
     system.set_weather(cfg.weather, &cfg.weather_location);
     // Fetch-style info for the dashboard (uptime refreshes as we draw).
     let fetch: Vec<(&'static str, String)> = pancake_fetch::gather();
+    // Calendar events, reloaded now and then.
+    let mut events = pancake_config::events::load();
+    let mut events_loaded = Instant::now();
 
     let mut app = App {
         configured: [false; 2],
@@ -288,6 +291,10 @@ fn run() -> Result<(), String> {
 
     while app.running {
         let info = system.snapshot();
+        if events_loaded.elapsed() > Duration::from_secs(20) {
+            events = pancake_config::events::load();
+            events_loaded = Instant::now();
+        }
         if let Some(which) = open_at_start.as_deref() {
             let want = match which {
                 "media" => Target::MediaCard,
@@ -499,7 +506,7 @@ fn run() -> Result<(), String> {
                 let px = pancake_draw::pixels(&mut p.bufs[i].1);
                 let mut canvas = Canvas::new(px, w as i32, h as i32, scale as f32);
                 let mut ui = Ui { c: &mut canvas, fonts: &mut fonts, icons: &mut icons, art: &mut art, apps: &apps, cfg: &cfg, accent, pointer: app.pointer.filter(|_| app.pointer_on == POPUP) };
-                let (hits, track) = ui.draw_card(kind, open, confirm, &info, &sys, &fetch);
+                let (hits, track) = ui.draw_card(kind, open, confirm, &info, &sys, &fetch, &events);
                 p.hits = hits;
                 if let (Some(t), Some((a, _))) = (track, p.drag) {
                     p.drag = Some((a, t.iter().find(|(k, _)| *k == a).map(|(_, r)| *r).unwrap_or_default()));
@@ -724,9 +731,7 @@ impl Ui<'_, '_> {
         let mut x = 6.0;
         let b = (x, mid - ISLAND_H / 2.0, ISLAND_H, ISLAND_H);
         self.c.rounded_rect(b.0, b.1, b.2, b.3, ISLAND_R, if inside(self.pointer, b) { SUBTLE_HOVER } else { ISLAND });
-        if let Some(logo) = pancake_draw::logo::image((24.0 * self.c.scale) as u32) {
-            self.c.image(&logo, (x + 4.0) as i32, (mid - 12.0) as i32);
-        }
+        self.sym("view-app-grid-symbolic", x + ISLAND_H / 2.0, mid, 18.0, TEXT);
         hits.push((b, Target::Launcher));
         x += ISLAND_H + GAP;
 
@@ -930,6 +935,7 @@ impl Ui<'_, '_> {
         info: &Info,
         sys: &stats::Stats,
         fetch: &[(&'static str, String)],
+        events: &[pancake_config::events::Event],
     ) -> (Vec<(Rect, PAction)>, Option<Vec<(PAction, Rect)>>) {
         let (w, h) = (self.c.w as f32, self.c.h as f32);
         let accent = 0xff00_0000 | self.accent;
@@ -1048,7 +1054,7 @@ impl Ui<'_, '_> {
                 }
             }
             PopupKind::Dashboard => {
-                card = self.draw_dashboard(w, h, top, below_bar, slide, info, sys, fetch, &mut hits);
+                card = self.draw_dashboard(w, h, top, below_bar, slide, info, sys, fetch, events, &mut hits);
             }
             PopupKind::Media => {
                 let cw = 420.0;
@@ -1176,6 +1182,7 @@ impl Ui<'_, '_> {
         info: &Info,
         sys: &stats::Stats,
         fetch: &[(&'static str, String)],
+        events: &[pancake_config::events::Event],
         hits: &mut Vec<(Rect, PAction)>,
     ) -> Rect {
         let accent = 0xff00_0000 | self.accent;
@@ -1221,19 +1228,35 @@ impl Ui<'_, '_> {
         let date = self.fonts.fit(&date, 14.0, true, wa - 24.0);
         let dw = self.fonts.width(&date, 14.0, true);
         self.c.text(self.fonts, &date, r.0 + (wa - dw) / 2.0, r.1 + 112.0, 14.0, true, accent);
-        if let Some(up) = pancake_fetch::uptime_secs() {
-            let t = format!("up {}", pancake_fetch::format_uptime(up));
-            let t = self.fonts.fit(&t, 11.0, false, wa - 24.0);
-            let uw = self.fonts.width(&t, 11.0, false);
-            self.c.text(self.fonts, &t, r.0 + (wa - uw) / 2.0, r.1 + 140.0, 11.0, false, TEXT_FAINT);
+        // Coming up (pancake-event add ...), or uptime when there's nothing.
+        let upcoming = pancake_config::events::upcoming(events, now.naive_local(), 2);
+        if upcoming.is_empty() {
+            if let Some(up) = pancake_fetch::uptime_secs() {
+                let t = format!("up {}", pancake_fetch::format_uptime(up));
+                let uw = self.fonts.width(&t, 11.0, false);
+                self.c.text(self.fonts, &t, r.0 + (wa - uw) / 2.0, r.1 + 140.0, 11.0, false, TEXT_FAINT);
+            }
+        }
+        for (i, e) in upcoming.iter().enumerate() {
+            let y = r.1 + 138.0 + i as f32 * 17.0;
+            let when = pancake_config::events::describe(e, now.date_naive());
+            let ww = self.c.text(self.fonts, &when, r.0 + 16.0, y, 11.0, true, accent);
+            let title = self.fonts.fit(&e.title, 11.0, false, wa - 40.0 - ww);
+            self.c.text(self.fonts, &title, r.0 + 16.0 + ww + 8.0, y, 11.0, false, TEXT);
         }
 
         // System info (fetch-style) with the palette as dots.
         let xb = x0 + wa + gap;
         let r = (xb, y0, wb, 118.0);
         self.tile(r);
-        if let Some(logo) = pancake_draw::logo::image((52.0 * self.c.scale) as u32) {
-            self.c.image(&logo, (r.0 + 12.0) as i32, (r.1 + 14.0) as i32);
+        // The real distro logo from the icon theme (os-release LOGO=).
+        let logo_px = (52.0 * self.c.scale) as u32;
+        let logo = pancake_fetch::os_logo().and_then(|n| self.icons.get(&n, logo_px).cloned());
+        match logo {
+            Some(img) => self.c.image(&img, (r.0 + 12.0) as i32, (r.1 + 14.0) as i32),
+            None => {
+                self.sym("start-here-symbolic", r.0 + 38.0, r.1 + 40.0, 40.0, TEXT_DIM);
+            }
         }
         let mut ly = r.1 + 24.0;
         for key in ["OS", "Kernel", "Packages", "Shell"] {
@@ -1276,6 +1299,11 @@ impl Ui<'_, '_> {
             let lw = self.fonts.width(&label, 11.0, d == day_today);
             if d == day_today {
                 self.c.circle(dx + cell_w / 2.0, dy + 8.0, 9.5, accent);
+            }
+            // A dot under days that have events.
+            let date = first + chrono::Duration::days(d as i64 - 1);
+            if events.iter().any(|e| e.date == date) {
+                self.c.circle(dx + cell_w / 2.0, dy + 16.5, 1.8, if d == day_today { on_accent } else { accent });
             }
             let fg = if d == day_today { on_accent } else if col == 0 || col == 6 { TEXT_DIM } else { TEXT };
             self.c.text(self.fonts, &label, dx + (cell_w - lw) / 2.0, dy + 12.0, 11.0, d == day_today, fg);

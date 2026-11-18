@@ -275,7 +275,8 @@ fn login(greetd: &mut Option<Greetd>, user: &str, password: &str, session: &str)
 
 /// A round avatar: the user's picture, or the pancake logo.
 fn avatar(user: &User, size: u32) -> Image {
-    let src = user.avatar.clone().or_else(|| pancake_draw::logo::image(size)).unwrap_or(Image { w: 1, h: 1, px: vec![0] });
+    // No picture: a plain tile (the initial is drawn over it by the caller).
+    let src = user.avatar.clone().unwrap_or(Image { w: 1, h: 1, px: vec![0xff3a322c] });
     let px = images::wallpaper(&src, size, size, images::Fit::Fill, 0x2a231e);
     let mut img = Image { w: size, h: size, px };
     let r = size as f32 / 2.0;
@@ -358,6 +359,11 @@ fn redraw(
     let size = (100.0 * scale as f32) as u32;
     let av = avatar(user, size);
     c.image(&av, (mid - 50.0) as i32, (cy + 164.0) as i32);
+    if user.avatar.is_none() {
+        let letter: String = user.display.chars().next().map(|ch| ch.to_uppercase().collect()).unwrap_or_default();
+        let lw = fonts.width(&letter, 44.0, true);
+        c.text(fonts, &letter, mid - lw / 2.0, cy + 230.0, 44.0, true, accent);
+    }
     let name = fonts.fit(&user.display, 20.0, true, cw - 120.0);
     let nw = fonts.width(&name, 20.0, true);
     c.text(fonts, &name, mid - nw / 2.0, cy + 304.0, 20.0, true, TEXT);

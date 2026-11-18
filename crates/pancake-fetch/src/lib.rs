@@ -25,6 +25,13 @@ pub fn os_from_release(text: &str) -> Option<String> {
     field("PRETTY_NAME").or_else(|| field("NAME"))
 }
 
+/// Icon name for the distro's logo (os-release LOGO=, e.g. "void-logo").
+pub fn os_logo() -> Option<String> {
+    let text = read("/etc/os-release").or_else(|| read("/usr/lib/os-release"))?;
+    let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(|v| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty());
+    field("LOGO").or_else(|| field("ID").map(|id| format!("distributor-logo-{id}")))
+}
+
 pub fn kernel() -> Option<String> {
     read("/proc/sys/kernel/osrelease").map(|s| s.trim().to_string())
 }

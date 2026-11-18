@@ -411,6 +411,9 @@ dependencies = [
 [[package]]
 name = "pancake-config"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "pancake-draw"

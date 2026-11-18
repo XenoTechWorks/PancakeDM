@@ -27,7 +27,7 @@ JOBS        = 2
 PROFILE     = release
 ZIG_BACKEND = auto
 
-BINS = pancake-compositor pancake-panel pancake-launcher pancake-settings pancake-greeter pancake-fetch
+BINS = pancake-compositor pancake-panel pancake-launcher pancake-settings pancake-greeter pancake-fetch pancake-event
 
 all: build
 
@@ -75,14 +75,12 @@ install:
 	chmod 644 "$(DESTDIR)$(SESSIONDIR)/pancake.desktop"
 	cp data/applications/org.pancakedm.Settings.desktop "$(DESTDIR)$(APPDIR)/"
 	chmod 644 "$(DESTDIR)$(APPDIR)/org.pancakedm.Settings.desktop"
-	cp data/icons/pancakedm.svg "$(DESTDIR)$(ICONDIR)/pancakedm.svg"
 	cp README.md docs/architecture.md data/greetd/config.toml "$(DESTDIR)$(DOCDIR)/"
 
 uninstall:
 	for b in $(BINS) pancake-session; do rm -f "$(DESTDIR)$(BINDIR)/$$b"; done
 	rm -f "$(DESTDIR)$(SESSIONDIR)/pancake.desktop"
 	rm -f "$(DESTDIR)$(APPDIR)/org.pancakedm.Settings.desktop"
-	rm -f "$(DESTDIR)$(ICONDIR)/pancakedm.svg"
 	rm -rf "$(DESTDIR)$(DOCDIR)"
 
 # ---- clean ------------------------------------------------------------------

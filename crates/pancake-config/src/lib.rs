@@ -118,6 +118,8 @@ impl Default for Config {
 pub const ACCENTS: [u32; 6] = [0xf4a259, 0xbc4b51, 0x8cb369, 0x5b8e7d, 0x3d5a80, 0x8e5b7d];
 
 /// Where the user's config lives: `$XDG_CONFIG_HOME/pancake` or `~/.config/pancake`.
+pub mod events;
+
 pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)

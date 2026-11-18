@@ -4,3 +4,10 @@ description = "Config loading and live reload for PancakeDM"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+
+[[bin]]
+name = "pancake-event"
+path = "src/bin/pancake-event.rs"

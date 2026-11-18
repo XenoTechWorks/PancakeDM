@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Media {
     pub player: String,
+    /// MPRIS instance (e.g. "firefox.instance_1_36"), for controlling it.
+    pub instance: String,
     pub playing: bool,
     pub title: String,
     pub artist: String,
@@ -157,6 +159,8 @@ impl System {
     /// Do something, in the background; status refreshes right after.
     pub fn act(&self, cmd: Cmd) {
         let wake = self.wake.clone();
+        // Control the player we're showing, not whichever is first.
+        let player = self.info.lock().unwrap().media.as_ref().map(|m| m.instance.clone());
         // Update what we show right away, so controls feel instant.
         {
             let mut i = self.info.lock().unwrap();
@@ -181,9 +185,9 @@ impl System {
         }
         std::thread::spawn(move || {
             match cmd {
-                Cmd::PlayPause => run("playerctl", &["play-pause"]),
-                Cmd::Next => run("playerctl", &["next"]),
-                Cmd::Previous => run("playerctl", &["previous"]),
+                Cmd::PlayPause => player_cmd(&player, "play-pause"),
+                Cmd::Next => player_cmd(&player, "next"),
+                Cmd::Previous => player_cmd(&player, "previous"),
                 Cmd::SetVolume(v) => run("wpctl", &["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{:.2}", v.clamp(0.0, 1.0))]),
                 Cmd::ToggleMute => run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]),
                 Cmd::ToggleWifi => {
@@ -241,10 +245,17 @@ fn poll_into(info: &Mutex<Info>, art_cache: &mut Option<(String, Option<PathBuf>
     }
 }
 
+fn player_cmd(player: &Option<String>, what: &str) {
+    match player {
+        Some(p) => run("playerctl", &["-p", p, what]),
+        None => run("playerctl", &[what]),
+    }
+}
+
 fn poll_media(art_cache: &mut Option<(String, Option<PathBuf>)>) -> Option<Media> {
-    let fmt = "{{playerName}}\t{{status}}\t{{artist}}\t{{title}}\t{{mpris:artUrl}}\t{{mpris:length}}\t{{position}}";
-    let out = output("playerctl", &["metadata", "--format", fmt])?;
-    let mut media = parse_media(out.lines().next()?)?;
+    let fmt = "{{playerName}}\t{{status}}\t{{artist}}\t{{title}}\t{{mpris:artUrl}}\t{{mpris:length}}\t{{position}}\t{{playerInstance}}";
+    let out = output("playerctl", &["-a", "metadata", "--format", fmt])?;
+    let mut media = pick_player(&out)?;
     let url = media.art.take().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     // Art: local files as they are; URLs downloaded once (needs curl).
     if art_cache.as_ref().map(|(u, _)| u != &url).unwrap_or(true) {
@@ -261,6 +272,14 @@ fn poll_media(art_cache: &mut Option<(String, Option<PathBuf>)>) -> Option<Media
     Some(media)
 }
 
+/// Of all players (one line each): the one playing, else the first
+/// paused one. So Spotify shows up even when a browser tab is open too.
+pub fn pick_player(out: &str) -> Option<Media> {
+    let all: Vec<Media> = out.lines().filter_map(parse_media).collect();
+    let i = all.iter().position(|m| m.playing).or(if all.is_empty() { None } else { Some(0) })?;
+    all.into_iter().nth(i)
+}
+
 /// One line of the playerctl format above. Art comes back as the raw URL
 /// (in `art`) for the caller to resolve.
 pub fn parse_media(line: &str) -> Option<Media> {
@@ -275,6 +294,7 @@ pub fn parse_media(line: &str) -> Option<Media> {
     let us = |s: &str| s.trim().parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
     Some(Media {
         player: f[0].trim().to_string(),
+        instance: f.get(7).map(|i| i.trim().to_string()).filter(|i| !i.is_empty()).unwrap_or_else(|| f[0].trim().to_string()),
         playing: status == "Playing",
         artist: f[2].trim().to_string(),
         title: f[3].trim().to_string(),
@@ -403,6 +423,15 @@ mod tests {
         assert_eq!(w.condition, "Light rain");
         assert_eq!(w.location, "Zurich");
         assert!(parse_weather("Unknown location").is_none());
+    }
+
+    #[test]
+    fn playing_player_wins_over_paused_one() {
+        let out = "firefox\tPaused\ta\tTab\t\t0\t0\tfirefox.instance_1\nspotify\tPlaying\tb\tSong\t\t1000000\t0\tspotify\n";
+        let m = pick_player(out).unwrap();
+        assert_eq!((m.player.as_str(), m.instance.as_str()), ("spotify", "spotify"));
+        // Nothing playing: first paused one.
+        assert_eq!(pick_player("a\tPaused\tx\tT\t\t0\t0\ta\nb\tPaused\tx\tU\t\t0\t0\tb\n").unwrap().player, "a");
     }
 
     #[test]
