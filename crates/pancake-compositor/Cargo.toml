@@ -1,0 +1,14 @@
+[package]
+name = "pancake-compositor"
+description = "PancakeDM Wayland compositor (window management; uses the Zig low-level layer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pancake-config.workspace = true
+pancake-ipc.workspace = true
+
+[features]
+# Link the Zig low-level layer (build it first: cd lowlevel && zig build)
+zig-backend = []

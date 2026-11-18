@@ -1,0 +1,10 @@
+[package]
+name = "pancake-panel"
+description = "PancakeDM top panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pancake-config.workspace = true
+pancake-ipc.workspace = true

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Start a PancakeDM session. Works with any init system:
+# systemd (logind), elogind, or seatd on runit/OpenRC/s6/KISS.
+# It never requires a specific one.
+
+export XDG_CURRENT_DESKTOP=Pancake
+export XDG_SESSION_DESKTOP=pancake
+export XDG_SESSION_TYPE=wayland
+
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    XDG_RUNTIME_DIR="/tmp/$(id -u)-runtime"
+    mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
+    export XDG_RUNTIME_DIR
+fi
+
+# Start a session D-Bus if nothing else did.
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null; then
+    exec dbus-run-session -- pancake-compositor "$@"
+fi
+exec pancake-compositor "$@"

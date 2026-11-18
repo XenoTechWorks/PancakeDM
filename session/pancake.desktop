@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=PancakeDM
+Comment=A configurable, good-looking desktop
+Exec=pancake-session
+Type=Application
+DesktopNames=Pancake

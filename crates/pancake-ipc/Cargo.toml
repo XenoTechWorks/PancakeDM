@@ -1,0 +1,6 @@
+[package]
+name = "pancake-ipc"
+description = "IPC protocol between the compositor and shell programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
