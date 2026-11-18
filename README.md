@@ -27,6 +27,7 @@ pancakes.
 - **Dashboard** (click the clock): weather, big clock, calendar with your
   events, system info with your distro's logo, gauges and a media player.
 - **Launcher**: full-screen app search with real icons (tap Super).
+- **Low-power mode**: backs off by itself when the CPU is hot.
 - **Desktop Settings**: wallpaper, panel, tiling, scale and accent color;
   changes apply live. The accent can follow your wallpaper.
 - **Login screen**: a greetd greeter, in the same style.

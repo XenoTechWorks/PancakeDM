@@ -278,6 +278,7 @@ fn run() -> Result<(), String> {
     let mut bufs: Vec<(wl_buffer::WlBuffer, MmapMut, (u32, u32))> = Vec::new();
     let mut popup: Option<Popup> = None;
     let mut reveal = Reveal::default();
+    let mut power = pancake_draw::power::Power::new();
     let mut last_width = 0u32;
     let mut status = pancake_ipc::Status::default();
     let mut hits: Vec<(Rect, Target)> = Vec::new();
@@ -406,7 +407,8 @@ fn run() -> Result<(), String> {
                 last_drawn.clear();
             }
         }
-        if last_stats.elapsed() >= Duration::from_secs(2) {
+        let low = power.active(&cfg);
+        if last_stats.elapsed() >= Duration::from_secs(if low { 8 } else { 2 }) {
             sys.refresh();
             last_stats = Instant::now();
         }
@@ -520,7 +522,7 @@ fn run() -> Result<(), String> {
 
         conn.flush().map_err(|e| e.to_string())?;
         let fast = popup.as_ref().is_some_and(|p| p.animating() || p.drag.is_some()) || reveal.animating();
-        let timeout = if fast { 16 } else if popup.is_some() { 120 } else { 250 };
+        let timeout = if fast { if low { 66 } else { 16 } } else if popup.is_some() { 120 } else { 250 };
         if let Some(guard) = queue.prepare_read() {
             if pancake_draw::wait_readable(fd, timeout) {
                 // "Would block" just means nothing arrived after all; only

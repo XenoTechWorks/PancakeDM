@@ -54,8 +54,18 @@ pub enum Layout {
     Floating,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LowPower {
+    /// Back off automatically when the CPU gets hot.
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    /// Low-power mode: no animations, slower refreshes.
+    pub low_power: LowPower,
     /// File name (looked up in the wallpaper folders) or a path; empty = none.
     pub wallpaper: String,
     pub wallpaper_mode: WallpaperMode,
@@ -92,6 +102,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            low_power: LowPower::Auto,
             wallpaper: "pancakes.jpg".into(),
             wallpaper_mode: WallpaperMode::Fill,
             background: 0xf4a259,
@@ -257,6 +268,14 @@ pub fn parse(text: &str) -> Config {
             .map(|b| c.clock_24h = b)
             .is_some(),
             ("panel", "show-date") => parse_bool(v).map(|b| c.show_date = b).is_some(),
+            ("panel", "low-power") => match v {
+                "auto" => Some(LowPower::Auto),
+                "on" => Some(LowPower::On),
+                "off" => Some(LowPower::Off),
+                _ => None,
+            }
+            .map(|l| c.low_power = l)
+            .is_some(),
             ("panel", "weather") => parse_bool(v).map(|b| c.weather = b).is_some(),
             ("panel", "weather-location") => {
                 c.weather_location = v.to_string();
@@ -323,6 +342,8 @@ pub fn to_text(c: &Config) -> String {
          # 24h or 12h\n\
          clock = {}\n\
          show-date = {}\n\
+         # auto (back off when the CPU is hot), on or off: no animations, slower updates\n\
+         low-power = {}\n\
          # Weather comes from wttr.in (it sees your IP address); on or off\n\
          weather = {}\n\
          # A city name, or empty to guess from your IP address\n\
@@ -355,6 +376,7 @@ pub fn to_text(c: &Config) -> String {
         if c.panel_position == PanelPosition::Top { "top" } else { "bottom" },
         if c.clock_24h { "24h" } else { "12h" },
         c.show_date,
+        match c.low_power { LowPower::Auto => "auto", LowPower::On => "on", LowPower::Off => "off" },
         c.weather,
         c.weather_location,
         if c.accent_auto { "auto".to_string() } else { format!("#{:06x}", c.accent) },
@@ -477,6 +499,7 @@ mod tests {
         c.accent_auto = false;
         c.layout = Layout::Floating;
         c.scale = 2;
+        c.low_power = LowPower::On;
         c.weather = false;
         c.weather_location = "Zurich".into();
         c.keybinds = vec![("super+t".into(), "spawn foot".into())];

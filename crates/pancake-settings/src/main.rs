@@ -5,7 +5,7 @@
 //! away; the compositor and panel notice and apply it live. Drawn by hand
 //! with pancake-draw, like the rest of the shell.
 
-use pancake_config::{Config, Layout, PanelPosition, WallpaperMode};
+use pancake_config::{Config, Layout, LowPower, PanelPosition, WallpaperMode};
 use pancake_draw::color::*;
 use pancake_draw::images::{self, Image};
 use pancake_draw::{Canvas, Fonts};
@@ -17,7 +17,7 @@ use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 const W: u32 = 780;
-const H: u32 = 746;
+const H: u32 = 792;
 const RADIUS: f32 = 18.0;
 const WINDOW_BG: u32 = 0xff221c18;
 const HEADER_BG: u32 = 0xff2a231e;
@@ -38,6 +38,7 @@ enum Action {
     AccentAuto,
     Layout(Layout),
     Scale(u32),
+    LowPower(LowPower),
     /// Page through the wallpapers (-1 / +1).
     Page(i32),
 }
@@ -220,6 +221,7 @@ fn apply(cfg: &mut Config, a: Action) {
         Action::AccentAuto => cfg.accent_auto = true,
         Action::Layout(l) => cfg.layout = l,
         Action::Scale(n) => cfg.scale = n,
+        Action::LowPower(l) => cfg.low_power = l,
         Action::Drag | Action::Close | Action::Page(_) => {}
     }
 }
@@ -380,6 +382,11 @@ fn draw(c: &mut Canvas, fonts: &mut Fonts, cfg: &Config, walls: &[(PathBuf, Opti
     c.text(fonts, "Scale", label_x, y + 22.0, 14.0, false, TEXT_DIM);
     hits.extend(segmented(c, fonts, ctrl_x, y, &[("100%", Action::Scale(1), cfg.scale == 1), ("200%", Action::Scale(2), cfg.scale == 2), ("300%", Action::Scale(3), cfg.scale == 3)], accent, pointer));
     c.text(fonts, "for HiDPI screens", ctrl_x + 210.0, y + 22.0, 12.0, false, TEXT_FAINT);
+    y += 46.0;
+    c.text(fonts, "Low power", label_x, y + 22.0, 14.0, false, TEXT_DIM);
+    let lp = cfg.low_power;
+    hits.extend(segmented(c, fonts, ctrl_x, y, &[("Auto", Action::LowPower(LowPower::Auto), lp == LowPower::Auto), ("On", Action::LowPower(LowPower::On), lp == LowPower::On), ("Off", Action::LowPower(LowPower::Off), lp == LowPower::Off)], accent, pointer));
+    c.text(fonts, "no animations, slower updates; Auto when the CPU is hot", ctrl_x + 190.0, y + 22.0, 12.0, false, TEXT_FAINT);
 
     // Accent color: "Auto" (from the wallpaper) first, then fixed colors.
     y += 70.0;
@@ -412,7 +419,12 @@ fn draw(c: &mut Canvas, fonts: &mut Fonts, cfg: &Config, walls: &[(PathBuf, Opti
     }
 
     // Footer.
-    let note = format!("Saved to {}", pancake_config::config_path().display());
+    let shown = pancake_config::config_path().display().to_string();
+    let shown = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => shown.replacen(&h, "~", 1),
+        _ => shown,
+    };
+    let note = format!("Saved to {shown}");
     c.text(fonts, &note, pad, h - 20.0, 12.0, false, TEXT_FAINT);
     hits
 }

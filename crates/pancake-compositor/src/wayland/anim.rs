@@ -59,7 +59,7 @@ fn snapshot(surface: &WlSurface) -> Option<(Vec<u32>, u32, u32, bool)> {
 impl State {
     /// Anything moving? Then the compositor keeps drawing frames.
     pub fn animating(&self) -> bool {
-        self.ws_anim.is_some_and(|(_, _, t)| t.elapsed() < WORKSPACE)
+        self.animations && self.ws_anim.is_some_and(|(_, _, t)| t.elapsed() < WORKSPACE)
             || !self.ghosts.is_empty()
             || self.windows.iter().any(|w| {
                 w.opened_at.is_some_and(|t| t.elapsed() < OPEN) || w.slide_from.is_some_and(|(_, t)| t.elapsed() < GLIDE)
@@ -70,6 +70,9 @@ impl State {
     /// The workspace switch in progress: (old workspace, its x offset,
     /// the new workspace's x offset).
     pub(super) fn ws_slide(&self) -> Option<(u32, i32, i32)> {
+        if !self.animations {
+            return None;
+        }
         let (from, dir, start) = self.ws_anim?;
         if start.elapsed() >= WORKSPACE {
             return None;
@@ -82,7 +85,7 @@ impl State {
     /// Fade-in amount and upward slide for a window that just opened.
     fn open_state(&self, i: usize) -> (f32, i32) {
         match self.windows[i].opened_at {
-            Some(t) if t.elapsed() < OPEN => {
+            Some(t) if self.animations && t.elapsed() < OPEN => {
                 let p = ease_out(progress(t, OPEN));
                 (p, ((1.0 - p) * 18.0 * self.scale as f32) as i32)
             }
@@ -130,7 +133,7 @@ impl State {
 
     /// Remember window `i`'s last frame so it can fade out after closing.
     pub(super) fn ghost_window(&mut self, i: usize) {
-        if !self.windows[i].placed || self.workspace_of(i) != self.active_ws {
+        if !self.animations || !self.windows[i].placed || self.workspace_of(i) != self.active_ws {
             return;
         }
         let Some((px, w, h, opaque)) = snapshot(&self.windows[i].surface) else { return };
@@ -145,7 +148,7 @@ impl State {
     /// Same for an overlay (e.g. the launcher closing).
     pub(super) fn ghost_layer(&mut self, surface: &WlSurface) {
         let Some(l) = self.layers.iter().find(|l| l.surface == *surface) else { return };
-        if !surface.is_alive() || surface_size(surface).0 == 0 {
+        if !self.animations || !surface.is_alive() || surface_size(surface).0 == 0 {
             return;
         }
         let Some((px, w, h, opaque)) = snapshot(surface) else { return };
@@ -157,7 +160,7 @@ impl State {
     /// Fade-in for a layer surface that just appeared.
     pub(super) fn layer_alpha(&self, l: &super::layer::Layer) -> f32 {
         match l.mapped_at {
-            Some(t) if t.elapsed() < LAYER => ease_out(progress(t, LAYER)),
+            Some(t) if self.animations && t.elapsed() < LAYER => ease_out(progress(t, LAYER)),
             _ => 1.0,
         }
     }

@@ -234,6 +234,8 @@ pub struct State {
     pub(super) scale: i32,
     outputs: Vec<WlOutput>,
     ghosts: Vec<anim::Ghost>,
+    /// Off in low-power mode.
+    pub(super) animations: bool,
     /// Workspace switch slide: (from workspace, direction, start).
     ws_anim: Option<(u32, i32, std::time::Instant)>,
     // Clipboard (see data.rs).
@@ -273,6 +275,7 @@ impl State {
             scale: 1,
             outputs: Vec::new(),
             ghosts: Vec::new(),
+            animations: true,
             ws_anim: None,
             dh: Some(dh),
             data_devices: Vec::new(),
@@ -400,7 +403,7 @@ impl State {
                 if let Some((tx, ty, _, _)) = w.tile {
                     let (gx, gy) = self.geom_offset(idx);
                     let target = (tx - gx, ty - gy);
-                    let (px, py) = anim::glide(w.slide_from, target);
+                    let (px, py) = anim::glide(w.slide_from.filter(|_| self.animations), target);
                     return (x + px, y + py);
                 }
                 return (x + w.x, y + w.y);
@@ -482,6 +485,14 @@ impl State {
         }
         self.arrange_layers();
         self.relayout();
+    }
+
+    pub fn set_animations(&mut self, on: bool) {
+        if on != self.animations {
+            self.animations = on;
+            self.ghosts.clear();
+            self.dirty = true;
+        }
     }
 
     pub fn set_output_size(&mut self, width: u32, height: u32) {

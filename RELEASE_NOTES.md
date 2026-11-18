@@ -25,6 +25,8 @@ only, so expect higher CPU use than a GPU-rendered desktop.
   It ducks away while the display scale or size changes.
 - **Dashboard** (click the clock): weather, clock, calendar with your
   events, system info with your distro's logo, gauges and a media player.
+- **Low-power mode** (Auto/On/Off in Settings): no animations and slower
+  updates, switching on by itself when the CPU passes 90°C.
 - **Launcher** with real app icons, **Desktop Settings** with live
   changes, and an accent color that can follow the wallpaper.
 - **Login screen**: a greeter for greetd.

@@ -423,6 +423,7 @@ dependencies = [
  "image",
  "memmap2",
  "pancake-config",
+ "pancake-fetch",
  "resvg",
 ]
 

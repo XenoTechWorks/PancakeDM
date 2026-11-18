@@ -328,6 +328,7 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
     // Keys whose press ran a keybind: their release isn't sent to apps either.
     let mut consumed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut config_watch = pancake_config::Watcher::new();
+    let mut power = pancake_draw::power::Power::new();
     let mut last_config_check = Instant::now();
     // Per output: needs a new frame / waiting for the last one to land.
     let mut dirty = vec![true; count];
@@ -351,6 +352,7 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
         }
         if last_config_check.elapsed() >= Duration::from_millis(500) {
             last_config_check = Instant::now();
+            wl.set_animations(!power.active(&cfg));
             if config_watch.changed() {
                 eprintln!("pancake-compositor: settings changed, reloading");
                 cfg = apply_config(&mut scene, &mut wl, &mut binds);

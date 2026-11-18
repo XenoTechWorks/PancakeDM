@@ -5,6 +5,7 @@
 //! Everything is drawn by hand; there's no toolkit.
 
 pub mod accent;
+pub mod power;
 pub mod apps;
 pub mod icons;
 pub mod images;
