@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Desktop Settings
+Comment=Wallpaper, panel and colors for PancakeDM
+Exec=pancake-settings
+Icon=preferences-desktop
+Categories=Settings;DesktopSettings;
+OnlyShowIn=Pancake;

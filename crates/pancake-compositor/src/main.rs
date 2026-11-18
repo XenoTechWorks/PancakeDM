@@ -28,7 +28,7 @@ Ctrl+Alt+F1..F12 switches VT.
 
   --drm              use the real screens even inside a Wayland desktop
   --no-panel         don't start pancake-panel
-  --fill RRGGBB      background color (default f4a259)
+  --fill RRGGBB      background color, no wallpaper (overrides pancake.conf)
   --anim             slide a bar across the background (shows any tearing)
   --seconds N        quit after N seconds (default: never)
   --list             list connected screens and exit
@@ -38,9 +38,6 @@ Ctrl+Alt+F1..F12 switches VT.
 
 msg commands (to a running compositor): screenshot PATH, windows, focus ID,
 launcher, quit";
-
-/// Default background: pancake gold.
-const DEFAULT_BACKGROUND: u32 = 0xf4a259;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).peekable();
@@ -98,7 +95,7 @@ fn main() -> ExitCode {
         } else {
             backend::drm::DrmBackend::new(device.as_deref()).map(|b| Box::new(b) as Box<dyn Backend>)
         };
-        backend.and_then(|mut b| run_session(b.as_mut(), fill.unwrap_or(DEFAULT_BACKGROUND), anim, panel, deadline))
+        backend.and_then(|mut b| run_session(b.as_mut(), fill, anim, panel, deadline))
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -209,7 +206,7 @@ fn spawn_shell_program(name: &str, wayland_display: &str, socket: &std::path::Pa
     }
 }
 
-fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, deadline: Option<Instant>) -> Result<(), String> {
+fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: bool, deadline: Option<Instant>) -> Result<(), String> {
     let mut outputs = backend.outputs();
     print_outputs(&outputs);
     let count = outputs.len();
@@ -234,7 +231,18 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, d
     let mut pointer = Pointer::new(outputs[0].width, outputs[0].height);
     wl.pointer_motion(pointer.x, pointer.y);
 
-    let scene = Scene { color, anim, started: Instant::now() };
+    // Settings from pancake.conf, reloaded whenever the file changes.
+    let mut scene = Scene::new(fill.unwrap_or(0xf4a259), anim);
+    let apply_config = |scene: &mut Scene| {
+        let mut cfg = pancake_config::load();
+        if fill.is_some() {
+            cfg.wallpaper.clear(); // --fill means a plain color
+        }
+        scene.configure(&cfg, fill);
+    };
+    apply_config(&mut scene);
+    let mut config_watch = pancake_config::Watcher::new();
+    let mut last_config_check = Instant::now();
     // Per output: needs a new frame / waiting for the last one to land.
     let mut dirty = vec![true; count];
     let mut busy = vec![false; count];
@@ -248,6 +256,14 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, d
     let mut events = Vec::new();
 
     while !expired(deadline) {
+        if last_config_check.elapsed() >= Duration::from_millis(500) {
+            last_config_check = Instant::now();
+            if config_watch.changed() {
+                eprintln!("pancake-compositor: settings changed, reloading");
+                apply_config(&mut scene);
+                dirty.fill(true);
+            }
+        }
         // Draw every output that wants a frame and isn't waiting on the last one.
         if active {
             for i in 0..count {
@@ -310,12 +326,7 @@ fn run_session(backend: &mut dyn Backend, color: u32, anim: bool, panel: bool, d
                         dirty[0] = true;
                     }
                     ipc::Command::Windows => {
-                        let list: Vec<pancake_ipc::WindowInfo> = wl
-                            .window_list()
-                            .into_iter()
-                            .map(|(id, title, focused)| pancake_ipc::WindowInfo { id, title, focused })
-                            .collect();
-                        ipc::reply(stream, &format!("ok {}", pancake_ipc::encode_windows(&list)));
+                        ipc::reply(stream, &format!("ok {}", pancake_ipc::encode_windows(&wl.window_list())));
                     }
                     ipc::Command::Focus(id) => {
                         let ok = wl.focus_window(id);

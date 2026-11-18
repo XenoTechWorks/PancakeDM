@@ -63,6 +63,8 @@ pub struct WindowInfo {
     pub id: u32,
     pub title: String,
     pub focused: bool,
+    /// The app's id (xdg_toplevel.set_app_id), for finding its icon.
+    pub app_id: String,
 }
 
 // Records are separated by ASCII RS, fields by US, so titles can contain
@@ -75,8 +77,8 @@ pub fn encode_windows(windows: &[WindowInfo]) -> String {
     windows
         .iter()
         .map(|w| {
-            let title: String = w.title.chars().filter(|c| *c != RS && *c != US && *c != '\n').collect();
-            format!("{}{US}{}{US}{title}", w.id, w.focused as u8)
+            let clean = |s: &str| s.chars().filter(|c| *c != RS && *c != US && *c != '\n').collect::<String>();
+            format!("{}{US}{}{US}{}{US}{}", w.id, w.focused as u8, clean(&w.app_id), clean(&w.title))
         })
         .collect::<Vec<_>>()
         .join(&RS.to_string())
@@ -86,10 +88,11 @@ pub fn decode_windows(reply: &str) -> Vec<WindowInfo> {
     let body = reply.strip_prefix("ok").unwrap_or(reply).trim_start_matches(' ');
     body.split(RS)
         .filter_map(|rec| {
-            let mut f = rec.splitn(3, US);
+            let mut f = rec.splitn(4, US);
             let id = f.next()?.parse().ok()?;
             let focused = f.next()? == "1";
-            Some(WindowInfo { id, focused, title: f.next().unwrap_or("").to_string() })
+            let app_id = f.next().unwrap_or("").to_string();
+            Some(WindowInfo { id, focused, app_id, title: f.next().unwrap_or("").to_string() })
         })
         .collect()
 }
@@ -110,8 +113,8 @@ mod tests {
     #[test]
     fn window_list_round_trips() {
         let list = vec![
-            WindowInfo { id: 3, title: "Files | Home".into(), focused: false },
-            WindowInfo { id: 7, title: "".into(), focused: true },
+            WindowInfo { id: 3, title: "Files | Home".into(), focused: false, app_id: "org.gnome.Nautilus".into() },
+            WindowInfo { id: 7, title: "".into(), focused: true, app_id: "".into() },
         ];
         assert_eq!(decode_windows(&format!("ok {}", encode_windows(&list))), list);
         assert_eq!(decode_windows("ok "), vec![]);

@@ -4,6 +4,10 @@
 //!
 //! Everything is drawn by hand; there's no toolkit.
 
+pub mod apps;
+pub mod icons;
+pub mod images;
+
 use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 
@@ -83,6 +87,12 @@ pub mod color {
     pub const ON_GOLD: u32 = 0xff2a1d12;
     pub const SUBTLE: u32 = 0x1affffff;
     pub const SUBTLE_HOVER: u32 = 0x2effffff;
+    /// Readable text on a 0xRRGGBB background: dark on light, light on dark.
+    pub fn text_on(rgb: u32) -> u32 {
+        let (r, g, b) = ((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+        if r * 299 + g * 587 + b * 114 > 140_000 { ON_GOLD } else { TEXT }
+    }
+
     /// Warm, distinct colors for things like app badges.
     pub const ACCENTS: [u32; 8] =
         [0xffbc4b51, 0xff5b8e7d, 0xff8cb369, 0xfff4a259, 0xff3d5a80, 0xff8e5b7d, 0xff2a9d8f, 0xffc9792f];
@@ -161,8 +171,8 @@ impl Canvas<'_> {
             for px in x0..x1 {
                 let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
                 // Distance outside the rounded shape (negative inside).
-                let cx = fx.clamp(x + r, x + w - r);
-                let cy = fy.clamp(y + r, y + h - r);
+                let cx = fx.max(x + r).min(x + w - r); // not clamp: r = w/2 can make min > max by rounding
+                let cy = fy.max(y + r).min(y + h - r);
                 let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() - r;
                 let edge_x = (fx - x).min(x + w - fx);
                 let edge_y = (fy - y).min(y + h - fy);
@@ -170,6 +180,27 @@ impl Canvas<'_> {
                 if cover > 0.0 {
                     let i = (py * self.w + px) as usize;
                     self.px[i] = over(premul(color, cover), self.px[i]);
+                }
+            }
+        }
+    }
+
+    /// Draw a premultiplied image with its top-left at (x, y).
+    pub fn image(&mut self, img: &images::Image, x: i32, y: i32) {
+        for row in 0..img.h as i32 {
+            let dy = y + row;
+            if dy < 0 || dy >= self.h {
+                continue;
+            }
+            for col in 0..img.w as i32 {
+                let dx = x + col;
+                if dx < 0 || dx >= self.w {
+                    continue;
+                }
+                let src = img.px[(row * img.w as i32 + col) as usize];
+                if src >> 24 != 0 {
+                    let i = (dy * self.w + dx) as usize;
+                    self.px[i] = over(src, self.px[i]);
                 }
             }
         }
@@ -216,6 +247,16 @@ mod tests {
         let half = premul(0x80ff_ffff, 1.0);
         assert_eq!(half >> 24, 0x80);
         assert_eq!(half & 0xff, 0x80); // channel scaled by alpha
+    }
+
+    #[test]
+    fn circles_with_fractional_sizes_dont_panic() {
+        let mut px = vec![0u32; 64 * 64];
+        let mut c = Canvas { px: &mut px, w: 64, h: 64 };
+        for i in 0..200 {
+            let r = 2.0 + i as f32 * 0.137;
+            c.circle(32.0, 32.0, r, 0xffffffff);
+        }
     }
 
     #[test]

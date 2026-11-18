@@ -146,12 +146,16 @@ pub fn write_png(path: &std::path::Path, w: u32, h: u32, px: &[u32]) -> std::io:
     std::fs::write(path, out)
 }
 
-/// What --fill shows: a background color, plus with --anim a bar sliding
-/// across. Tearing would show up as the bar breaking into offset pieces.
+/// The desktop behind the windows: wallpaper (or a color), plus with --anim
+/// a bar sliding across (tearing would break it into offset pieces).
 pub struct Scene {
     pub color: u32,
     pub anim: bool,
     pub started: std::time::Instant,
+    wallpaper: Option<pancake_draw::images::Image>,
+    fit: pancake_draw::images::Fit,
+    /// The wallpaper laid out for one screen size, reused every frame.
+    cache: Option<(u32, u32, Vec<u32>)>,
 }
 
 const BAR_WIDTH: u32 = 64;
@@ -160,8 +164,43 @@ const BAR_COLOR: u32 = 0xfff3e3;
 const BAR_PERIOD: f64 = 2.0;
 
 impl Scene {
-    pub fn draw(&self, c: &mut Canvas) {
-        c.clear(self.color);
+    pub fn new(color: u32, anim: bool) -> Self {
+        Self { color, anim, started: std::time::Instant::now(), wallpaper: None, fit: pancake_draw::images::Fit::Fill, cache: None }
+    }
+
+    /// Use these settings; the wallpaper is decoded once here.
+    pub fn configure(&mut self, cfg: &pancake_config::Config, color_override: Option<u32>) {
+        use pancake_config::WallpaperMode as M;
+        use pancake_draw::images::Fit;
+        self.color = color_override.unwrap_or(cfg.background);
+        self.fit = match cfg.wallpaper_mode {
+            M::Fill => Fit::Fill,
+            M::Fit => Fit::Fit,
+            M::Center => Fit::Center,
+            M::Stretch => Fit::Stretch,
+        };
+        self.wallpaper = cfg.wallpaper_path().and_then(|p| {
+            let img = pancake_draw::images::load(&p, None);
+            if img.is_none() {
+                eprintln!("pancake-compositor: can't load wallpaper {}", p.display());
+            }
+            img
+        });
+        self.cache = None;
+    }
+
+    pub fn draw(&mut self, c: &mut Canvas) {
+        match &self.wallpaper {
+            Some(img) => {
+                let (w, h) = (c.width, c.height);
+                if self.cache.as_ref().map_or(true, |(cw, ch, _)| (*cw, *ch) != (w, h)) {
+                    self.cache = Some((w, h, pancake_draw::images::wallpaper(img, w, h, self.fit, self.color)));
+                }
+                let (_, _, px) = self.cache.as_ref().unwrap();
+                c.blit(0, 0, w, h, px, true);
+            }
+            None => c.clear(self.color),
+        }
         if self.anim {
             let x = bar_x(self.started.elapsed().as_secs_f64(), c.width);
             c.rect(x, 0, BAR_WIDTH, c.height, BAR_COLOR);

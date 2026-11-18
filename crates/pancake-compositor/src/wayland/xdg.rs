@@ -188,6 +188,11 @@ impl Dispatch<XdgToplevel, XdgData> for State {
                     state.windows[i].title = title;
                 }
             }
+            xdg_toplevel::Request::SetAppId { app_id } => {
+                if let Some(i) = find(state) {
+                    state.windows[i].app_id = app_id;
+                }
+            }
             // The app's own title bar was dragged.
             xdg_toplevel::Request::Move { .. } => {
                 if let Some(i) = find(state) {

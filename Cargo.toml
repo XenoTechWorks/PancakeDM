@@ -27,4 +27,6 @@ memmap2 = "0.9"
 xkbcommon = "0.8"
 wayland-protocols-wlr = { version = "0.3", features = ["server", "client"] }
 fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+resvg = { version = "0.45", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

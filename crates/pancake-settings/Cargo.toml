@@ -1,10 +1,13 @@
 [package]
 name = "pancake-settings"
-description = "PancakeDM Settings app"
+description = "PancakeDM Desktop Settings"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 pancake-config.workspace = true
-pancake-ipc.workspace = true
+pancake-draw.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+memmap2.workspace = true

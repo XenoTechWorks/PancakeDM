@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 pancake-config.workspace = true
 pancake-ipc.workspace = true
+pancake-draw.workspace = true
 wayland-server.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true

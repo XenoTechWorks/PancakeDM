@@ -5,10 +5,9 @@
 //! move, Enter or a click opens, Esc or a click outside closes. The
 //! compositor starts it from the panel's Pancake button or a Super tap.
 
-mod apps;
-
-use apps::App;
+use pancake_draw::apps::{self, App};
 use pancake_draw::color::*;
+use pancake_draw::icons::Icons;
 use pancake_draw::{Canvas, Fonts};
 use std::os::fd::{AsFd, AsRawFd};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -55,6 +54,21 @@ struct Launcher {
     /// Tile rectangles from the last draw, with the result index each shows.
     tiles: Vec<((f32, f32, f32, f32), usize)>,
     card: (f32, f32, f32, f32),
+    icons: Icons,
+    accent: u32,
+}
+
+/// Desktop Settings is always listed, even before PancakeDM is installed.
+fn builtin_apps() -> Vec<App> {
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("pancake-settings"))).filter(|p| p.exists());
+    let exec = beside.map(|p| p.display().to_string()).unwrap_or_else(|| "pancake-settings".into());
+    vec![App {
+        id: "org.pancakedm.Settings.desktop".into(),
+        name: "Desktop Settings".into(),
+        exec,
+        icon: Some("preferences-desktop".into()),
+        wm_class: None,
+    }]
 }
 
 fn main() {
@@ -66,7 +80,14 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut fonts = Fonts::load()?;
-    let apps = apps::load_all();
+    let cfg = pancake_config::load();
+    let mut apps = apps::load_all();
+    for b in builtin_apps() {
+        if !apps.iter().any(|a| a.id == b.id) {
+            apps.push(b);
+        }
+    }
+    apps.sort_by_key(|a| a.name.to_lowercase());
     let conn = Connection::connect_to_env().map_err(|e| format!("can't connect to Wayland: {e}"))?;
     let (globals, mut queue) = registry_queue_init::<Launcher>(&conn).map_err(|e| e.to_string())?;
     let qh = queue.handle();
@@ -104,6 +125,8 @@ fn run() -> Result<(), String> {
         buffer_free: [true; 2],
         tiles: Vec::new(),
         card: (0.0, 0.0, 0.0, 0.0),
+        icons: Icons::new(&cfg.icon_theme),
+        accent: 0xff00_0000 | cfg.accent,
     };
     let mut bufs: Vec<(wl_buffer::WlBuffer, memmap2::MmapMut, (u32, u32))> = Vec::new();
     let fd = conn.backend().poll_fd().as_raw_fd();
@@ -266,7 +289,7 @@ impl Launcher {
             c.text(fonts, "Search apps…", sx + 46.0, baseline, 17.0, false, TEXT_FAINT);
         } else {
             let tw = c.text(fonts, &self.query, sx + 46.0, baseline, 17.0, false, TEXT);
-            c.rounded_rect(sx + 48.0 + tw, sy + 13.0, 2.0, 22.0, 1.0, GOLD); // caret
+            c.rounded_rect(sx + 48.0 + tw, sy + 13.0, 2.0, 22.0, 1.0, self.accent); // caret
         }
 
         // Grid of apps.
@@ -290,23 +313,28 @@ impl Launcher {
             let (col, row) = (slot % self.columns, slot / self.columns);
             let (tx, ty) = (x0 + col as f32 * TILE_W, gy + row as f32 * TILE_H);
             let rect = (tx + 4.0, ty + 4.0, TILE_W - 8.0, TILE_H - 8.0);
-            let app = &self.apps[self.results[i]];
+            let app = self.apps[self.results[i]].clone();
             let hover = self.pointer.is_some_and(|(px, py)| {
                 let (px, py) = (px as f32, py as f32);
                 px >= rect.0 && px < rect.0 + rect.2 && py >= rect.1 && py < rect.1 + rect.3
             });
             if i == self.selected {
-                c.rounded_rect(rect.0, rect.1, rect.2, rect.3, 16.0, GOLD);
+                c.rounded_rect(rect.0, rect.1, rect.2, rect.3, 16.0, self.accent);
                 c.rounded_rect(rect.0 + 2.0, rect.1 + 2.0, rect.2 - 4.0, rect.3 - 4.0, 14.0, TILE_RING_INNER);
             } else if hover {
                 c.rounded_rect(rect.0, rect.1, rect.2, rect.3, 16.0, SUBTLE);
             }
-            // Letter badge (real icons come later).
+            // The app's icon, or a letter badge if it has none we can find.
             let (bx, by) = (tx + TILE_W / 2.0, ty + 42.0);
-            c.circle(bx, by, 27.0, badge_color(&app.name));
-            let letter: String = app.name.chars().next().map(|ch| ch.to_uppercase().collect()).unwrap_or_default();
-            let lw = fonts.width(&letter, 24.0, true);
-            c.text(fonts, &letter, bx - lw / 2.0, by + 8.5, 24.0, true, 0xffffffff);
+            let icon = app.icon.as_ref().and_then(|n| self.icons.get(n, 56));
+            if let Some(img) = icon {
+                c.image(img, (bx - 28.0) as i32, (by - 28.0) as i32);
+            } else {
+                c.circle(bx, by, 27.0, badge_color(&app.name));
+                let letter: String = app.name.chars().next().map(|ch| ch.to_uppercase().collect()).unwrap_or_default();
+                let lw = fonts.width(&letter, 24.0, true);
+                c.text(fonts, &letter, bx - lw / 2.0, by + 8.5, 24.0, true, 0xffffffff);
+            }
             // Name, centered and cut to fit.
             let name = fonts.fit(&app.name, 13.0, false, TILE_W - 16.0);
             let nw = fonts.width(&name, 13.0, false);

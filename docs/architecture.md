@@ -122,6 +122,60 @@ launcher join this session even when nested in another desktop.
 The shell programs share `pancake-draw`: the palette, anti-aliased
 shapes, text, and small shm/poll helpers.
 
+## Configuration
+
+Everything the user can change lives in one file,
+`~/.config/pancake/pancake.conf`, in a simple format of our own:
+
+```ini
+[desktop]
+wallpaper = pancakes.jpg      # a name in a wallpaper folder, a path, or empty
+wallpaper-mode = fill         # fill, fit, center, stretch
+background = #f4a259          # shown with no wallpaper, or around "fit"
+
+[panel]
+position = top                # top or bottom
+clock = 24h                   # 24h or 12h
+show-date = true
+
+[theme]
+accent = #f4a259              # focus and selection color
+icon-theme = Adwaita
+```
+
+Missing keys get defaults, unknown keys are ignored, bad values keep
+their default with a warning. The compositor and panel check the file's
+modification time about twice a second and apply changes live; Desktop
+Settings writes it atomically (temp file, then rename).
+
+Wallpapers are found by name in `~/.local/share/pancake/wallpapers`,
+`$XDG_DATA_DIRS/pancake/wallpapers` and `~/Pictures/Wallpapers`. The
+compositor decodes the wallpaper once (JPEG or PNG, via the `image`
+crate), lays it out for the screen size once, and copies it in each
+frame. The default `pancakes.jpg` isn't in the repository (its license
+isn't confirmed for redistribution); drop it, or any image, into the
+wallpaper folder.
+
+## Desktop Settings
+
+`pancake-settings` is a regular window drawn with `pancake-draw`. It
+covers the wallpaper (thumbnails of everything in the wallpaper folders,
+paged four at a time, plus "No wallpaper") and its mode, the panel's
+position, clock style and date, and the accent color. Every click saves
+`pancake.conf` immediately. It opens from the panel's settings button
+or from the launcher (it's always listed there).
+
+## Icons
+
+`pancake-draw::icons` looks up freedesktop icon themes: the configured
+theme, then Adwaita, Breeze, Papirus and hicolor, in the user's,
+system and Flatpak icon folders, preferring the exact size, then larger
+(downscaled), then smaller, then scalable; then `/usr/share/pixmaps`.
+PNGs are scaled with the `image` crate and SVGs rendered at the exact
+size with `resvg`. The launcher shows each app's icon; the panel shows
+icons in the window pills, matching a window's app id to a desktop entry
+(by file id, `StartupWMClass` or program name).
+
 ## Nested mode (development)
 
 Started from inside another Wayland desktop, `pancake-compositor` opens

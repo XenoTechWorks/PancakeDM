@@ -10,6 +10,10 @@ pub struct App {
     pub name: String,
     /// Command line with field codes (%f, %U, ...) removed.
     pub exec: String,
+    /// Icon name (looked up in the icon theme) or absolute path.
+    pub icon: Option<String>,
+    /// StartupWMClass: helps match windows (by app id) to this entry.
+    pub wm_class: Option<String>,
 }
 
 /// Where `applications/` folders live, most important first: the user's
@@ -70,7 +74,7 @@ fn collect(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>, depth: u32
 /// Parse the [Desktop Entry] section. None for things that shouldn't be
 /// listed: hidden, NoDisplay, not an application, or no command.
 pub fn parse(id: &str, text: &str) -> Option<App> {
-    let (mut in_entry, mut name, mut exec, mut kind) = (false, None, None, None);
+    let (mut in_entry, mut name, mut exec, mut kind, mut icon, mut wm_class) = (false, None, None, None, None, None);
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
@@ -85,6 +89,8 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
             "Name" => name = Some(v.trim().to_string()),
             "Exec" => exec = Some(v.trim().to_string()),
             "Type" => kind = Some(v.trim().to_string()),
+            "Icon" => icon = Some(v.trim().to_string()).filter(|i| !i.is_empty()),
+            "StartupWMClass" => wm_class = Some(v.trim().to_string()),
             "NoDisplay" | "Hidden" if v.trim() == "true" => return None,
             _ => {}
         }
@@ -96,7 +102,23 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
     if exec.is_empty() {
         return None;
     }
-    Some(App { id: id.to_string(), name: name?, exec })
+    Some(App { id: id.to_string(), name: name?, exec, icon, wm_class })
+}
+
+/// The entry for a window's app id: by desktop file id, StartupWMClass,
+/// or the command's program name (case-insensitive).
+pub fn for_app_id<'a>(apps: &'a [App], app_id: &str) -> Option<&'a App> {
+    if app_id.is_empty() {
+        return None;
+    }
+    let id = app_id.to_lowercase();
+    let program = |a: &App| {
+        a.exec.split_whitespace().next().map(|p| p.rsplit('/').next().unwrap_or(p).to_lowercase()).unwrap_or_default()
+    };
+    apps.iter()
+        .find(|a| a.id.to_lowercase() == format!("{id}.desktop"))
+        .or_else(|| apps.iter().find(|a| a.wm_class.as_deref().is_some_and(|w| w.to_lowercase() == id)))
+        .or_else(|| apps.iter().find(|a| program(a) == id))
 }
 
 /// Remove %f %U etc. (we launch without files); "%%" becomes "%".
@@ -150,14 +172,29 @@ mod tests {
     use super::*;
 
     fn app(name: &str, exec: &str) -> App {
-        App { id: format!("{name}.desktop"), name: name.into(), exec: exec.into() }
+        App { id: format!("{name}.desktop"), name: name.into(), exec: exec.into(), icon: None, wm_class: None }
+    }
+
+    #[test]
+    fn matches_windows_to_entries() {
+        let mut files = app("Files", "nautilus --new-window");
+        files.id = "org.gnome.Nautilus.desktop".into();
+        files.icon = Some("org.gnome.Nautilus".into());
+        let mut vol = app("Volume Control", "pavucontrol");
+        vol.wm_class = Some("org.pulseaudio.pavucontrol".into());
+        let apps = vec![files, vol];
+        assert_eq!(for_app_id(&apps, "org.gnome.Nautilus").unwrap().name, "Files");
+        assert_eq!(for_app_id(&apps, "org.pulseaudio.pavucontrol").unwrap().name, "Volume Control");
+        assert_eq!(for_app_id(&apps, "nautilus").unwrap().name, "Files");
+        assert!(for_app_id(&apps, "").is_none());
     }
 
     #[test]
     fn parses_desktop_entries() {
         let text = "[Desktop Entry]\nType=Application\nName=Files\nName[de]=Dateien\nExec=nautilus --new-window %U\n\n[Desktop Action new]\nName=New Window\nExec=other\n";
-        let a = parse("org.gnome.Nautilus.desktop", text).unwrap();
+        let a = parse("org.gnome.Nautilus.desktop", &text.replace("Type=Application\n", "Type=Application\nIcon=org.gnome.Nautilus\n")).unwrap();
         assert_eq!(a.name, "Files");
+        assert_eq!(a.icon.as_deref(), Some("org.gnome.Nautilus"));
         assert_eq!(a.exec, "nautilus --new-window");
     }
 

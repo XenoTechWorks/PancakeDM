@@ -123,6 +123,7 @@ struct Window {
     /// of the surface's top-left.
     parent: Option<WlSurface>,
     title: String,
+    app_id: String,
     x: i32,
     y: i32,
     /// The "real" window inside the surface, without drop shadows
@@ -135,7 +136,7 @@ impl Window {
     fn new(surface: WlSurface, xdg: XdgSurface, toplevel: Option<XdgToplevel>, popup: Option<XdgPopup>, parent: Option<WlSurface>) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self { id, surface, xdg, toplevel, popup, parent, title: String::new(), x: 0, y: 0, geometry: None, placed: false }
+        Self { id, surface, xdg, toplevel, popup, parent, title: String::new(), app_id: String::new(), x: 0, y: 0, geometry: None, placed: false }
     }
 }
 
@@ -335,17 +336,17 @@ impl State {
         }
     }
 
-    /// Open windows: (id, title, focused), oldest first.
-    pub fn window_list(&self) -> Vec<(u32, String, bool)> {
+    /// Open windows, oldest first.
+    pub fn window_list(&self) -> Vec<pancake_ipc::WindowInfo> {
         let focused = self.kb_focus.as_ref().and_then(|s| self.root_window(s));
-        let mut list: Vec<(u32, String, bool)> = self
+        let mut list: Vec<pancake_ipc::WindowInfo> = self
             .windows
             .iter()
             .enumerate()
             .filter(|(_, w)| w.toplevel.is_some() && w.placed)
-            .map(|(i, w)| (w.id, w.title.clone(), Some(i) == focused))
+            .map(|(i, w)| pancake_ipc::WindowInfo { id: w.id, title: w.title.clone(), focused: Some(i) == focused, app_id: w.app_id.clone() })
             .collect();
-        list.sort_by_key(|w| w.0);
+        list.sort_by_key(|w| w.id);
         list
     }
 
