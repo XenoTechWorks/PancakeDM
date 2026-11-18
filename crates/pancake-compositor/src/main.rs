@@ -3,9 +3,11 @@
 
 mod cursor;
 mod low;
+mod render;
 
 use cursor::{CursorImage, Pointer};
 use low::{key, InputEvent};
+use render::Scene;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -16,6 +18,7 @@ usage: pancake-compositor [options]
   --fill RRGGBB      fill every screen with a color and show the cursor
                      (run from a TTY); Space cycles colors, Esc quits,
                      Ctrl+Alt+F1..F12 switches VT
+  --anim             with --fill: slide a bar across (shows any tearing)
   --seconds N        stop after N seconds (default 60, 0 = no limit)
   --device PATH      DRM device (default /dev/dri/card0)
   --version          print versions and exit";
@@ -26,10 +29,12 @@ const PALETTE: [u32; 4] = [0xf4a259, 0x8cb369, 0x5b8e7d, 0xbc4b51];
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (mut list, mut input, mut fill, mut seconds, mut device) = (false, false, None, 60u64, None);
+    let mut anim = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--list" => list = true,
             "--input" => input = true,
+            "--anim" => anim = true,
             "--fill" => match args.next().and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok()) {
                 Some(c) => fill = Some(c),
                 None => return fail("--fill needs a color like f4a259"),
@@ -54,7 +59,7 @@ fn main() -> ExitCode {
     let deadline = (seconds > 0).then(|| Instant::now() + Duration::from_secs(seconds));
 
     let result = if let Some(color) = fill {
-        run_fill(device.as_deref(), color, deadline)
+        run_fill(device.as_deref(), color, anim, deadline)
     } else if input {
         run_input(deadline)
     } else if list {
@@ -113,7 +118,7 @@ impl Mods {
     }
 }
 
-fn run_fill(device: Option<&str>, mut color: u32, deadline: Option<Instant>) -> Result<(), String> {
+fn run_fill(device: Option<&str>, color: u32, anim: bool, deadline: Option<Instant>) -> Result<(), String> {
     // Drop order is the reverse of this: input and screens are released
     // first, then the VT, then the seat.
     let seat = low::Seat::open();
@@ -135,33 +140,35 @@ fn run_fill(device: Option<&str>, mut color: u32, deadline: Option<Instant>) -> 
     }
     print_outputs(&outputs);
     let input = low::Input::open(seat.as_ref())?;
+    let count = outputs.len();
 
     // The cursor lives on screen 0 for now; multi-screen layout comes later.
     let main = &outputs[0];
     let img = CursorImage::placeholder_for(main.height, dev.cursor_size());
     let mut pointer = Pointer::new(main.width, main.height);
-    let count = outputs.len() as u32;
-
-    // Puts everything on screen. Called at start and whenever the VT comes back,
-    // because another session may have changed the screens meanwhile.
-    let redraw = |color: u32, pointer: &Pointer| -> Result<bool, String> {
-        (0..count).try_for_each(|i| dev.fill(i, color))?;
-        for i in 1..count {
+    let setup_cursor = |pointer: &Pointer| -> bool {
+        for i in 1..count as u32 {
             dev.hide_cursor(i);
         }
         match dev.set_cursor(0, &img) {
             Ok(()) => {
                 let (x, y) = pointer.pixel();
                 dev.move_cursor(0, x, y);
-                Ok(true)
+                true
             }
             Err(e) => {
                 eprintln!("pancake-compositor: {e}; running without a cursor");
-                Ok(false)
+                false
             }
         }
     };
-    let mut has_cursor = redraw(color, &pointer)?;
+
+    let mut scene = Scene { color, anim, started: Instant::now() };
+    // Per output: needs a new frame / waiting for the GPU to flip the last one.
+    let mut dirty = vec![true; count];
+    let mut busy = vec![false; count];
+    let mut has_cursor = false;
+    let mut first_frame = true;
 
     // Start after the current color, so the first Space always changes it.
     let mut next = PALETTE.iter().position(|&c| c == color).map_or(0, |i| (i + 1) % PALETTE.len());
@@ -169,13 +176,51 @@ fn run_fill(device: Option<&str>, mut color: u32, deadline: Option<Instant>) -> 
     let mut active = true;
 
     while !expired(deadline) {
-        let mut fds = vec![input.fd()];
+        // Draw every output that wants a frame and isn't waiting on a flip.
+        if active {
+            for i in 0..count {
+                if !dirty[i] || busy[i] {
+                    continue;
+                }
+                let Some(mut canvas) = dev.begin_frame(i as u32)? else {
+                    busy[i] = true;
+                    continue;
+                };
+                scene.draw(&mut canvas);
+                let shown_now = dev.commit_frame(i as u32)?;
+                busy[i] = !shown_now;
+                // A frame shown by modeset gets no flip event, so when
+                // animating, queue the next frame here instead.
+                dirty[i] = shown_now && scene.anim;
+            }
+            if first_frame {
+                // After the first modeset, so the cursor sits on our screens.
+                has_cursor = setup_cursor(&pointer);
+                first_frame = false;
+            }
+        }
+
+        let mut fds = vec![input.fd(), dev.fd()];
         if let Some(s) = &seat {
             fds.push(s.fd());
         }
         let ready = low::wait(&fds, 100);
 
-        if let (Some(s), Some(true)) = (&seat, ready.get(1)) {
+        if ready[1] {
+            let landed = dev.dispatch();
+            for i in 0..count {
+                if landed & (1 << i) != 0 {
+                    busy[i] = false;
+                    // Animating: draw the next frame now that this one is up,
+                    // so we render exactly once per screen refresh.
+                    if scene.anim {
+                        dirty[i] = true;
+                    }
+                }
+            }
+        }
+
+        if let (Some(s), Some(true)) = (&seat, ready.get(2)) {
             let ev = s.dispatch();
             if ev.disabled {
                 // Switched away: let go of everything, then tell the seat.
@@ -187,7 +232,10 @@ fn run_fill(device: Option<&str>, mut color: u32, deadline: Option<Instant>) -> 
             if ev.enabled {
                 active = true;
                 input.resume();
-                has_cursor = redraw(color, &pointer)?;
+                dev.reset();
+                busy.fill(false);
+                dirty.fill(true);
+                first_frame = true;
             }
         }
         if !active || !ready[0] {
@@ -207,9 +255,9 @@ fn run_fill(device: Option<&str>, mut color: u32, deadline: Option<Instant>) -> 
                     } else if code == key::ESC {
                         return Ok(());
                     } else if code == key::SPACE {
-                        color = PALETTE[next];
+                        scene.color = PALETTE[next];
                         next = (next + 1) % PALETTE.len();
-                        (0..count).try_for_each(|i| dev.fill(i, color))?;
+                        dirty.fill(true);
                     }
                 }
                 InputEvent::Motion { dx, dy } => pointer.move_by(dx, dy),
@@ -218,6 +266,7 @@ fn run_fill(device: Option<&str>, mut color: u32, deadline: Option<Instant>) -> 
             }
         }
         // One move per batch of events, and only when it actually changed.
+        // The cursor plane updates on its own; no new frame needed.
         if has_cursor && pointer.pixel() != before.pixel() {
             let (x, y) = pointer.pixel();
             dev.move_cursor(0, x, y);

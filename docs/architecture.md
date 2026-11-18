@@ -25,6 +25,20 @@ although borrowing code from them (and from wlroots, sway, etc.) is fine.
 The shell programs run as separate processes, so a crashing panel
 doesn't take down the session.
 
+## Frames
+
+Each screen has two buffers. The compositor draws a whole frame into the
+hidden one, then asks the GPU to swap them at the next screen refresh
+(a page flip). Until the GPU reports the swap through the DRM fd, that
+screen is busy and nothing draws to it, so a visible buffer is never
+touched and frames can't tear. When animating, the next frame is drawn
+as soon as the last one lands: exactly one frame per refresh. Animation
+uses elapsed time, not frame counts, so speed is the same at any
+refresh rate.
+
+Drawing is in software for now (`render.rs`); GPU rendering can slot in
+later behind the same begin-frame / draw / commit flow.
+
 ## Init systems
 
 PancakeDM works with systemd, elogind, runit, OpenRC, s6 and anything

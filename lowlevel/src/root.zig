@@ -2,6 +2,7 @@
 //! Exposed to the Rust compositor through a C ABI (include/pancake_low.h).
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 comptime {
     _ = @import("input.zig");
@@ -15,6 +16,10 @@ const c = @cImport({
     @cInclude("sys/mman.h");
     @cInclude("unistd.h");
 });
+
+// Zig 0.13 spells the C calling convention .C; 0.14+ spells it .c.
+const cc: std.builtin.CallingConvention =
+    if (builtin.zig_version.order(.{ .major = 0, .minor = 14, .patch = 0 }) == .lt) .C else .c;
 
 const version_major = 0;
 const version_minor = 1;
@@ -36,19 +41,25 @@ const Output = struct {
     /// What the CRTC showed before us, restored on close.
     saved: [*c]c.drmModeCrtc,
     name: [32]u8,
-    fb_id: u32 = 0,
-    handle: u32 = 0,
-    pitch: u32 = 0,
-    size: u64 = 0,
-    map: ?[*]u8 = null,
-    cursor: [2]CursorBuf = .{ .{}, .{} },
+    /// Two screen buffers: one on screen (front), one we draw into.
+    bufs: [2]Buf = .{ .{}, .{} },
+    front: usize = 0,
+    /// A page flip is queued and the GPU hasn't swapped yet: don't draw.
+    flip_pending: bool = false,
+    /// Set by the flip-done event; collected by pancake_low_dispatch.
+    flipped: bool = false,
+    /// First frame, or after getting the VT back: do a full modeset.
+    needs_modeset: bool = true,
+    cursor: [2]Buf = .{ .{}, .{} },
     /// Which cursor buffer is on screen; the other one is safe to draw into.
     cursor_front: usize = 0,
     hot_x: i32 = 0,
     hot_y: i32 = 0,
 };
 
-const CursorBuf = struct {
+/// A dumb buffer mapped into our memory. fb_id is 0 for cursor buffers.
+const Buf = struct {
+    fb_id: u32 = 0,
     handle: u32 = 0,
     pitch: u32 = 0,
     size: u64 = 0,
@@ -128,27 +139,107 @@ export fn pancake_low_output_info(handle: ?*anyopaque, index: u32, info: *Output
     return 0;
 }
 
-/// Fill an output with one XRGB8888 color and show it.
-/// Returns 0, or <0: -1 bad index, -2 buffer setup failed, -3 modeset failed
-/// (usually: another compositor owns the GPU; run from a TTY).
-export fn pancake_low_fill(handle: ?*anyopaque, index: u32, xrgb: u32) c_int {
+// ---- Frames and page flipping --------------------------------------------------
+//
+// Each output has two buffers. We only ever draw into the one that isn't on
+// screen, then ask the GPU to swap them at the next vblank (page flip). The
+// GPU tells us through the DRM fd when the swap happened; until then the
+// output is busy. Nothing is ever drawn into a visible buffer: no tearing.
+
+/// Matches `struct pancake_frame` in pancake_low.h.
+const Frame = extern struct {
+    pixels: ?[*]u32,
+    stride: u32, // in pixels
+    width: u32,
+    height: u32,
+};
+
+/// The DRM fd: poll it, and call pancake_low_dispatch when it's readable.
+export fn pancake_low_fd(handle: ?*anyopaque) c_int {
+    return dev_of(handle).fd;
+}
+
+/// Get the hidden buffer to draw the next frame into (XRGB8888).
+/// 0 = `frame` filled in; 1 = busy, a flip is still pending; <0 = error.
+export fn pancake_frame_begin(handle: ?*anyopaque, index: u32, frame: *Frame) c_int {
     const dev = dev_of(handle);
     if (index >= dev.count) return -1;
     const out = &dev.outputs[index];
-    if (out.map == null) createFb(dev.fd, out) catch return -2;
-
-    const px: [*]u32 = @ptrCast(@alignCast(out.map.?));
-    const w: usize = out.mode.hdisplay;
-    const stride: usize = out.pitch / 4;
-    var y: usize = 0;
-    while (y < out.mode.vdisplay) : (y += 1) {
-        @memset((px + y * stride)[0..w], xrgb);
-    }
-
-    var conn = out.connector_id;
-    if (c.drmModeSetCrtc(dev.fd, out.crtc_id, out.fb_id, 0, 0, &conn, 1, &out.mode) != 0)
-        return -3;
+    if (out.flip_pending) return 1;
+    const back = &out.bufs[1 - out.front];
+    if (back.map == null) createFb(dev.fd, out.mode, back) catch return -2;
+    frame.* = .{
+        .pixels = @ptrCast(@alignCast(back.map.?)),
+        .stride = back.pitch / 4,
+        .width = out.mode.hdisplay,
+        .height = out.mode.vdisplay,
+    };
     return 0;
+}
+
+/// Show the frame drawn since pancake_frame_begin.
+/// 0 = flip queued (the output is busy until pancake_low_dispatch reports it);
+/// 2 = shown right away (first frame / after reset: full modeset);
+/// <0 = error (-3: the GPU refused, e.g. another compositor owns it).
+export fn pancake_frame_commit(handle: ?*anyopaque, index: u32) c_int {
+    const dev = dev_of(handle);
+    if (index >= dev.count) return -1;
+    const out = &dev.outputs[index];
+    const back_i = 1 - out.front;
+    const back = &out.bufs[back_i];
+    if (back.fb_id == 0 or out.flip_pending) return -2;
+
+    if (out.needs_modeset) {
+        var conn = out.connector_id;
+        if (c.drmModeSetCrtc(dev.fd, out.crtc_id, back.fb_id, 0, 0, &conn, 1, &out.mode) != 0)
+            return -3;
+        out.needs_modeset = false;
+        out.front = back_i;
+        return 2;
+    }
+    if (c.drmModePageFlip(dev.fd, out.crtc_id, back.fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, out) != 0)
+        return -3;
+    out.flip_pending = true;
+    // The old front is still on screen until the flip lands, but begin()
+    // refuses while flip_pending, so nobody can draw into it early.
+    out.front = back_i;
+    return 0;
+}
+
+fn onPageFlip(_: c_int, _: c_uint, _: c_uint, _: c_uint, data: ?*anyopaque) callconv(cc) void {
+    const out: *Output = @ptrCast(@alignCast(data.?));
+    out.flip_pending = false;
+    out.flipped = true;
+}
+
+/// Read DRM events (call when pancake_low_fd is readable). Returns a bitmask
+/// of outputs whose flip just landed: they're free for the next frame.
+export fn pancake_low_dispatch(handle: ?*anyopaque) u32 {
+    const dev = dev_of(handle);
+    var ctx = std.mem.zeroes(c.drmEventContext);
+    ctx.version = 2;
+    ctx.page_flip_handler = onPageFlip;
+    _ = c.drmHandleEvent(dev.fd, &ctx);
+    var mask: u32 = 0;
+    for (dev.outputs[0..dev.count], 0..) |*out, i| {
+        if (out.flipped) {
+            mask |= @as(u32, 1) << @as(u5, @intCast(i));
+            out.flipped = false;
+        }
+    }
+    return mask;
+}
+
+/// After getting the VT back: flips queued before the switch will never
+/// land, and another session may have changed the screens. Forget pending
+/// flips; the next commit on each output does a full modeset.
+export fn pancake_low_reset(handle: ?*anyopaque) void {
+    const dev = dev_of(handle);
+    for (dev.outputs[0..dev.count]) |*out| {
+        out.flip_pending = false;
+        out.flipped = false;
+        out.needs_modeset = true;
+    }
 }
 
 /// Restore what each screen showed before, free everything, close the GPU.
@@ -169,9 +260,11 @@ export fn pancake_low_close(handle: ?*anyopaque) void {
             }
             c.drmModeFreeCrtc(s);
         }
-        if (out.map) |m| _ = c.munmap(m, out.size);
-        if (out.fb_id != 0) _ = c.drmModeRmFB(dev.fd, out.fb_id);
-        if (out.handle != 0) _ = c.drmModeDestroyDumbBuffer(dev.fd, out.handle);
+        for (&out.bufs) |*b| {
+            if (b.map) |m| _ = c.munmap(m, b.size);
+            if (b.fb_id != 0) _ = c.drmModeRmFB(dev.fd, b.fb_id);
+            if (b.handle != 0) _ = c.drmModeDestroyDumbBuffer(dev.fd, b.handle);
+        }
     }
     if (dev.owns_fd) {
         _ = c.drmDropMaster(dev.fd);
@@ -241,7 +334,7 @@ export fn pancake_cursor_hide(handle: ?*anyopaque, index: u32) c_int {
     return c.drmModeSetCursor(dev.fd, dev.outputs[index].crtc_id, 0, 0, 0);
 }
 
-fn createCursorBuf(dev: *Device, cb: *CursorBuf) !void {
+fn createCursorBuf(dev: *Device, cb: *Buf) !void {
     if (c.drmModeCreateDumbBuffer(dev.fd, dev.cursor_w, dev.cursor_h, 32, 0, &cb.handle, &cb.pitch, &cb.size) != 0)
         return error.CreateDumb;
     var offset: u64 = 0;
@@ -305,19 +398,21 @@ fn findCrtc(fd: c_int, res: [*c]c.drmModeRes, conn: [*c]c.drmModeConnector, used
     return null;
 }
 
-fn createFb(fd: c_int, out: *Output) !void {
-    const w = out.mode.hdisplay;
-    const h = out.mode.vdisplay;
-    if (c.drmModeCreateDumbBuffer(fd, w, h, 32, 0, &out.handle, &out.pitch, &out.size) != 0)
+fn createFb(fd: c_int, mode: c.drmModeModeInfo, b: *Buf) !void {
+    const w = mode.hdisplay;
+    const h = mode.vdisplay;
+    if (c.drmModeCreateDumbBuffer(fd, w, h, 32, 0, &b.handle, &b.pitch, &b.size) != 0)
         return error.CreateDumb;
-    if (c.drmModeAddFB(fd, w, h, 24, 32, out.pitch, out.handle, &out.fb_id) != 0)
+    if (c.drmModeAddFB(fd, w, h, 24, 32, b.pitch, b.handle, &b.fb_id) != 0)
         return error.AddFb;
     var offset: u64 = 0;
-    if (c.drmModeMapDumbBuffer(fd, out.handle, &offset) != 0)
+    if (c.drmModeMapDumbBuffer(fd, b.handle, &offset) != 0)
         return error.MapDumb;
-    const p = c.mmap(null, out.size, c.PROT_READ | c.PROT_WRITE, c.MAP_SHARED, fd, @intCast(offset));
+    const p = c.mmap(null, b.size, c.PROT_READ | c.PROT_WRITE, c.MAP_SHARED, fd, @intCast(offset));
     if (p == null or @intFromPtr(p) == std.math.maxInt(usize)) return error.Mmap;
-    out.map = @ptrCast(p);
+    b.map = @ptrCast(p);
+    // Start black, not with whatever was in that memory.
+    @memset(b.map.?[0..@intCast(b.size)], 0);
 }
 
 fn connectorName(t: u32) []const u8 {

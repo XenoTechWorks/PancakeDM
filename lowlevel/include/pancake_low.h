@@ -24,8 +24,25 @@ pancake_device *pancake_low_open_fd(int fd);
 uint32_t pancake_low_output_count(pancake_device *dev);
 int pancake_low_output_info(pancake_device *dev, uint32_t index,
                             struct pancake_output_info *info);
-/* Fill an output with one 0xXXRRGGBB color. 0 on success, <0 on error. */
-int pancake_low_fill(pancake_device *dev, uint32_t index, uint32_t xrgb);
+/* ---- Frames and page flipping ---- */
+
+struct pancake_frame {
+    uint32_t *pixels; /* XRGB8888 */
+    uint32_t stride;  /* in pixels */
+    uint32_t width;
+    uint32_t height;
+};
+
+/* DRM fd: poll it, then call pancake_low_dispatch when readable. */
+int pancake_low_fd(pancake_device *dev);
+/* Hidden buffer for the next frame. 0 = ok, 1 = busy (flip pending). */
+int pancake_frame_begin(pancake_device *dev, uint32_t index, struct pancake_frame *frame);
+/* Show it. 0 = flip queued, 2 = shown now (modeset), <0 = error. */
+int pancake_frame_commit(pancake_device *dev, uint32_t index);
+/* Bitmask of outputs whose flip just landed. */
+uint32_t pancake_low_dispatch(pancake_device *dev);
+/* After the VT comes back: drop pending flips, next commit re-modesets. */
+void pancake_low_reset(pancake_device *dev);
 /* Restore the previous screen contents and close the device. */
 void pancake_low_close(pancake_device *dev);
 

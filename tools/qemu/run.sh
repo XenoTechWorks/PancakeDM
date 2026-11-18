@@ -4,6 +4,7 @@
 #
 #   tools/qemu/run.sh              build image + boot with a window
 #   tools/qemu/run.sh --headless   no window (screenshots via the monitor)
+#   PANCAKE_ARGS="--fill 5b8e7d" tools/qemu/run.sh   change compositor options
 #
 # Screenshots, mouse and keys: tools/qemu/vmctl.py (see its --help).
 # Run `make` first. Only one VM at a time.
@@ -17,6 +18,7 @@ OUT=$ROOT/out/qemu
 STAGE=$OUT/root
 BIN=$ROOT/target/release/pancake-compositor
 DISPLAY_OPT="-display gtk,zoom-to-fit=on"
+PANCAKE_ARGS=${PANCAKE_ARGS:---fill f4a259 --anim --seconds 0}
 [ "${1:-}" = --headless ] && DISPLAY_OPT="-display none"
 
 [ -x "$BIN" ] || { echo "run 'make' first" >&2; exit 1; }
@@ -95,7 +97,7 @@ export XDG_RUNTIME_DIR=/run/user/0
 mkdir -p \$XDG_RUNTIME_DIR
 echo "pancake: starting compositor" >/dev/ttyS0
 while :; do
-    setsid -c sh -c 'pancake-compositor --fill f4a259 --seconds 0' \
+    setsid -c sh -c 'pancake-compositor $PANCAKE_ARGS' \
         </dev/tty1 >/dev/tty1 2>/dev/ttyS0
     echo "pancake: compositor exited (\$?), restarting in 2s" >/dev/ttyS0
     sleep 2

@@ -27,7 +27,11 @@ mod ffi {
         pub fn pancake_seat_close(seat: *mut c_void);
         pub fn pancake_low_output_count(dev: *mut c_void) -> u32;
         pub fn pancake_low_output_info(dev: *mut c_void, index: u32, info: *mut OutputInfo) -> c_int;
-        pub fn pancake_low_fill(dev: *mut c_void, index: u32, xrgb: u32) -> c_int;
+        pub fn pancake_low_fd(dev: *mut c_void) -> c_int;
+        pub fn pancake_frame_begin(dev: *mut c_void, index: u32, frame: *mut Frame) -> c_int;
+        pub fn pancake_frame_commit(dev: *mut c_void, index: u32) -> c_int;
+        pub fn pancake_low_dispatch(dev: *mut c_void) -> u32;
+        pub fn pancake_low_reset(dev: *mut c_void);
         pub fn pancake_low_close(dev: *mut c_void);
 
         pub fn pancake_cursor_size(dev: *mut c_void, w: *mut u32, h: *mut u32);
@@ -46,6 +50,14 @@ mod ffi {
         pub fn pancake_input_close(input: *mut c_void);
 
         pub fn poll(fds: *mut PollFd, nfds: u64, timeout_ms: c_int) -> c_int;
+    }
+
+    #[repr(C)]
+    pub struct Frame {
+        pub pixels: *mut u32,
+        pub stride: u32,
+        pub width: u32,
+        pub height: u32,
     }
 
     #[repr(C)]
@@ -138,12 +150,45 @@ impl Device {
             .collect()
     }
 
-    pub fn fill(&self, index: u32, xrgb: u32) -> Result<(), String> {
-        match unsafe { ffi::pancake_low_fill(self.raw, index, xrgb) } {
-            0 => Ok(()),
-            -3 => Err("modeset failed: another compositor owns the GPU (run from a TTY)".into()),
-            e => Err(format!("fill failed ({e})")),
+    /// The DRM fd: wait on it, then call `dispatch`.
+    pub fn fd(&self) -> i32 {
+        unsafe { ffi::pancake_low_fd(self.raw) }
+    }
+
+    /// The hidden buffer to draw output `index`'s next frame into, or None
+    /// while its previous frame is still waiting for the GPU to flip.
+    pub fn begin_frame(&self, index: u32) -> Result<Option<crate::render::Canvas<'_>>, String> {
+        let mut f = ffi::Frame { pixels: std::ptr::null_mut(), stride: 0, width: 0, height: 0 };
+        match unsafe { ffi::pancake_frame_begin(self.raw, index, &mut f) } {
+            0 => {}
+            1 => return Ok(None),
+            e => return Err(format!("can't get a frame buffer ({e})")),
         }
+        // Safety: the Zig layer hands us a mapped buffer of stride*height
+        // pixels that nothing else touches until we commit.
+        let pixels = unsafe { std::slice::from_raw_parts_mut(f.pixels, (f.stride * f.height) as usize) };
+        Ok(Some(crate::render::Canvas::new(pixels, f.stride, f.width, f.height)))
+    }
+
+    /// Show the frame. Ok(true) = on screen now; Ok(false) = flip queued,
+    /// the output is busy until `dispatch` reports it.
+    pub fn commit_frame(&self, index: u32) -> Result<bool, String> {
+        match unsafe { ffi::pancake_frame_commit(self.raw, index) } {
+            0 => Ok(false),
+            2 => Ok(true),
+            -3 => Err("the GPU refused the frame: another compositor owns it (run from a TTY)".into()),
+            e => Err(format!("commit failed ({e})")),
+        }
+    }
+
+    /// Handle DRM events; returns a bitmask of outputs whose flip landed.
+    pub fn dispatch(&self) -> u32 {
+        unsafe { ffi::pancake_low_dispatch(self.raw) }
+    }
+
+    /// After the VT comes back: forget pending flips, re-modeset next frame.
+    pub fn reset(&self) {
+        unsafe { ffi::pancake_low_reset(self.raw) }
     }
 
     /// Largest cursor image the GPU's cursor plane takes.
@@ -192,9 +237,19 @@ impl Device {
     pub fn outputs(&self) -> Vec<Output> {
         Vec::new()
     }
-    pub fn fill(&self, _index: u32, _xrgb: u32) -> Result<(), String> {
+    pub fn fd(&self) -> i32 {
+        -1
+    }
+    pub fn begin_frame(&self, _index: u32) -> Result<Option<crate::render::Canvas<'_>>, String> {
         Err("built without the Zig low-level layer".into())
     }
+    pub fn commit_frame(&self, _index: u32) -> Result<bool, String> {
+        Err("built without the Zig low-level layer".into())
+    }
+    pub fn dispatch(&self) -> u32 {
+        0
+    }
+    pub fn reset(&self) {}
     pub fn cursor_size(&self) -> (u32, u32) {
         (64, 64)
     }
