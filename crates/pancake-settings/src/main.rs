@@ -5,7 +5,7 @@
 //! away; the compositor and panel notice and apply it live. Drawn by hand
 //! with pancake-draw, like the rest of the shell.
 
-use pancake_config::{Config, PanelPosition, WallpaperMode};
+use pancake_config::{Config, Layout, PanelPosition, WallpaperMode};
 use pancake_draw::color::*;
 use pancake_draw::images::{self, Image};
 use pancake_draw::{Canvas, Fonts};
@@ -17,7 +17,7 @@ use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 const W: u32 = 780;
-const H: u32 = 640;
+const H: u32 = 700;
 const RADIUS: f32 = 18.0;
 const WINDOW_BG: u32 = 0xff221c18;
 const HEADER_BG: u32 = 0xff2a231e;
@@ -35,6 +35,8 @@ enum Action {
     Clock24(bool),
     ToggleDate,
     Accent(u32),
+    AccentAuto,
+    Layout(Layout),
     /// Page through the wallpapers (-1 / +1).
     Page(i32),
 }
@@ -199,7 +201,12 @@ fn apply(cfg: &mut Config, a: Action) {
         Action::Position(p) => cfg.panel_position = p,
         Action::Clock24(b) => cfg.clock_24h = b,
         Action::ToggleDate => cfg.show_date = !cfg.show_date,
-        Action::Accent(c) => cfg.accent = c,
+        Action::Accent(c) => {
+            cfg.accent = c;
+            cfg.accent_auto = false;
+        }
+        Action::AccentAuto => cfg.accent_auto = true,
+        Action::Layout(l) => cfg.layout = l,
         Action::Drag | Action::Close | Action::Page(_) => {}
     }
 }
@@ -248,7 +255,8 @@ fn arrow_button(c: &mut Canvas, r: (f32, f32, f32, f32), left: bool, enabled: bo
 }
 
 fn draw(c: &mut Canvas, fonts: &mut Fonts, cfg: &Config, walls: &[(PathBuf, Option<Image>)], page: usize, pointer: Option<(f64, f64)>) -> Vec<((f32, f32, f32, f32), Action)> {
-    let accent = 0xff00_0000 | cfg.accent;
+    let auto_accent = pancake_draw::accent::effective(&Config { accent_auto: true, ..cfg.clone() });
+    let accent = 0xff00_0000 | if cfg.accent_auto { auto_accent } else { cfg.accent };
     let (w, h) = (c.w as f32, c.h as f32);
     let mut hits = Vec::new();
     c.px.fill(0);
@@ -349,13 +357,34 @@ fn draw(c: &mut Canvas, fonts: &mut Fonts, cfg: &Config, walls: &[(PathBuf, Opti
     c.circle(knob_x, sw.1 + 13.0, 10.0, 0xfff6eee3);
     hits.push((sw, Action::ToggleDate));
 
-    // Accent color.
+    // Windows.
+    y += 70.0;
+    section(c, fonts, "Windows", y);
+    y += 18.0;
+    c.text(fonts, "New windows", label_x, y + 22.0, 14.0, false, TEXT_DIM);
+    hits.extend(segmented(c, fonts, ctrl_x, y, &[("Tile", Action::Layout(Layout::Tiling), cfg.layout == Layout::Tiling), ("Float", Action::Layout(Layout::Floating), cfg.layout == Layout::Floating)], accent, pointer));
+
+    // Accent color: "Auto" (from the wallpaper) first, then fixed colors.
     y += 70.0;
     section(c, fonts, "Accent color", y);
     y += 16.0;
+    {
+        let (cx, cy) = (pad + 18.0, y + 20.0);
+        if cfg.accent_auto {
+            c.circle(cx, cy, 19.0, 0xfff6eee3);
+            c.circle(cx, cy, 16.5, WINDOW_BG);
+        } else if inside(pointer, (cx - 16.0, cy - 16.0, 32.0, 32.0)) {
+            c.circle(cx, cy, 19.0, SUBTLE_HOVER);
+        }
+        c.circle(cx, cy, 14.0, 0xff00_0000 | auto_accent);
+        let aw = fonts.width("A", 13.0, true);
+        c.text(fonts, "A", cx - aw / 2.0, cy + 5.0, 13.0, true, text_on(auto_accent));
+        hits.push(((cx - 16.0, cy - 16.0, 32.0, 32.0), Action::AccentAuto));
+        c.text(fonts, "Auto uses your wallpaper's color", pad + 360.0, cy + 5.0, 12.0, false, TEXT_FAINT);
+    }
     for (i, &col) in pancake_config::ACCENTS.iter().enumerate() {
-        let (cx, cy) = (pad + 18.0 + i as f32 * 48.0, y + 20.0);
-        if cfg.accent == col {
+        let (cx, cy) = (pad + 18.0 + (i + 1) as f32 * 48.0, y + 20.0);
+        if !cfg.accent_auto && cfg.accent == col {
             c.circle(cx, cy, 19.0, 0xfff6eee3);
             c.circle(cx, cy, 16.5, WINDOW_BG);
         } else if inside(pointer, (cx - 16.0, cy - 16.0, 32.0, 32.0)) {

@@ -4,6 +4,7 @@
 mod backend;
 mod cursor;
 mod ipc;
+mod keybinds;
 mod low;
 mod render;
 mod wayland;
@@ -22,9 +23,12 @@ usage: pancake-compositor [options]
 With no options, runs the compositor: apps connect over Wayland
 (WAYLAND_DISPLAY is printed at start). Inside another Wayland desktop it
 opens as a window (nested); from a TTY it takes the real screens.
-Click a window to focus it, Alt+drag moves it. Tap Super (or click
-Pancake in the panel) for the app launcher. Ctrl+Alt+Backspace quits,
-Ctrl+Alt+F1..F12 switches VT.
+Windows tile (dwindle) on workspaces 1-9. Keybinds come from the
+[keybinds] section of pancake.conf (defaults: Super+Return terminal,
+Super+Q close, Super+1..9 workspaces, Super+arrows/HJKL focus, Super+
+Shift+... swap/move, Super+V float, Super+F maximize, Super+Space or a
+Super tap for the launcher). Alt+drag moves a window (floating it).
+Ctrl+Alt+Backspace quits, Ctrl+Alt+F1..F12 switches VT.
 
   --drm              use the real screens even inside a Wayland desktop
   --no-panel         don't start pancake-panel
@@ -37,7 +41,7 @@ Ctrl+Alt+F1..F12 switches VT.
   --version          print versions and exit
 
 msg commands (to a running compositor): screenshot PATH, windows, focus ID,
-launcher, quit";
+launcher, action ACTION (e.g. 'action workspace 2'), quit";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).peekable();
@@ -129,6 +133,8 @@ struct Mods {
     ctrl_r: bool,
     alt_l: bool,
     alt_r: bool,
+    shift_l: bool,
+    shift_r: bool,
     meta: bool,
     /// Super went down and nothing else happened yet: a tap, if released now.
     meta_alone: bool,
@@ -150,9 +156,29 @@ impl Mods {
             key::RIGHTCTRL => self.ctrl_r = pressed,
             key::LEFTALT => self.alt_l = pressed,
             key::RIGHTALT => self.alt_r = pressed,
+            42 => self.shift_l = pressed,
+            54 => self.shift_r = pressed,
             _ => {}
         }
         tap
+    }
+
+    /// Held modifiers as keybinds::{SHIFT, CTRL, ALT, SUPER} bits.
+    fn bits(&self) -> u8 {
+        let mut b = 0;
+        if self.shift_l || self.shift_r {
+            b |= keybinds::SHIFT;
+        }
+        if self.ctrl_l || self.ctrl_r {
+            b |= keybinds::CTRL;
+        }
+        if self.alt_l || self.alt_r {
+            b |= keybinds::ALT;
+        }
+        if self.meta {
+            b |= keybinds::SUPER;
+        }
+        b
     }
 
     fn alt(&self) -> bool {
@@ -180,6 +206,44 @@ impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// Run a command line in this session, detached (the app outlives the
+/// shell that starts it, and nobody has to reap it).
+fn spawn_command(cmd: &str, wayland_display: &str, socket: &std::path::Path) {
+    let result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("({cmd}) >/dev/null 2>&1 &"))
+        .env("WAYLAND_DISPLAY", wayland_display)
+        .env("PANCAKE_SOCKET", socket)
+        .env("XDG_CURRENT_DESKTOP", "Pancake")
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env_remove("DISPLAY")
+        .status();
+    if let Err(e) = result {
+        eprintln!("pancake-compositor: can't run {cmd}: {e}");
+    }
+}
+
+/// The terminal to open: the configured command, or (auto) the first
+/// installed app in the TerminalEmulator category.
+fn terminal_command(cfg: &pancake_config::Config) -> Option<String> {
+    if cfg.terminal != "auto" && !cfg.terminal.is_empty() {
+        return Some(cfg.terminal.clone());
+    }
+    let apps = pancake_draw::apps::load_all();
+    pancake_draw::apps::find_terminal(&apps).map(|a| a.exec.clone())
+}
+
+/// The window style from the config (accent from the wallpaper if auto).
+fn style_from(cfg: &pancake_config::Config) -> wayland::Style {
+    wayland::Style {
+        gaps: cfg.gaps as i32,
+        radius: cfg.corner_radius as i32,
+        border: cfg.border as i32,
+        accent: pancake_draw::accent::effective(cfg),
+        new_windows_float: cfg.layout == pancake_config::Layout::Floating,
     }
 }
 
@@ -233,14 +297,25 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
 
     // Settings from pancake.conf, reloaded whenever the file changes.
     let mut scene = Scene::new(fill.unwrap_or(0xf4a259), anim);
-    let apply_config = |scene: &mut Scene| {
+    let mut cfg = pancake_config::load();
+    let mut binds = keybinds::Keybinds::from_config(&cfg.keybinds).0;
+    let apply_config = |scene: &mut Scene, wl: &mut wayland::State, binds: &mut keybinds::Keybinds| -> pancake_config::Config {
         let mut cfg = pancake_config::load();
         if fill.is_some() {
             cfg.wallpaper.clear(); // --fill means a plain color
         }
         scene.configure(&cfg, fill);
+        wl.set_style(style_from(&cfg));
+        let (b, warnings) = keybinds::Keybinds::from_config(&cfg.keybinds);
+        for w in warnings {
+            eprintln!("pancake-compositor: pancake.conf: {w}");
+        }
+        *binds = b;
+        cfg
     };
-    apply_config(&mut scene);
+    cfg = apply_config(&mut scene, &mut wl, &mut binds);
+    // Keys whose press ran a keybind: their release isn't sent to apps either.
+    let mut consumed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut config_watch = pancake_config::Watcher::new();
     let mut last_config_check = Instant::now();
     // Per output: needs a new frame / waiting for the last one to land.
@@ -260,7 +335,7 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
             last_config_check = Instant::now();
             if config_watch.changed() {
                 eprintln!("pancake-compositor: settings changed, reloading");
-                apply_config(&mut scene);
+                cfg = apply_config(&mut scene, &mut wl, &mut binds);
                 dirty.fill(true);
             }
         }
@@ -326,7 +401,8 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                         dirty[0] = true;
                     }
                     ipc::Command::Windows => {
-                        ipc::reply(stream, &format!("ok {}", pancake_ipc::encode_windows(&wl.window_list())));
+                        let status = pancake_ipc::Status { active_workspace: wl.active_workspace(), windows: wl.window_list() };
+                        ipc::reply(stream, &format!("ok {}", pancake_ipc::encode_status(&status)));
                     }
                     ipc::Command::Focus(id) => {
                         let ok = wl.focus_window(id);
@@ -335,6 +411,12 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                     ipc::Command::Launcher => {
                         toggle_launcher(&mut launcher);
                         ipc::reply(stream, "ok");
+                    }
+                    ipc::Command::Action(a) => {
+                        ipc::reply(stream, "ok");
+                        if run_action(&a, &mut wl, backend, &cfg, &session_name, ipc.path(), &mut launcher, &toggle_launcher) {
+                            return Ok(());
+                        }
                     }
                     ipc::Command::Quit => {
                         ipc::reply(stream, "ok");
@@ -393,6 +475,19 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                             if mods.update(code, pressed) {
                                 toggle_launcher(&mut launcher);
                             }
+                            // Keybinds: run on press; swallow press and release.
+                            if pressed {
+                                if let Some(a) = binds.lookup(mods.bits(), code).cloned() {
+                                    consumed.insert(code);
+                                    mods.meta_alone = false;
+                                    if run_action(&a, &mut wl, backend, &cfg, &session_name, ipc.path(), &mut launcher, &toggle_launcher) {
+                                        return Ok(());
+                                    }
+                                    continue;
+                                }
+                            } else if consumed.remove(&code) {
+                                continue;
+                            }
                             // Compositor shortcuts first; everything else goes to the app.
                             if pressed && mods.ctrl_alt() {
                                 if let Some(n) = key::function_number(code) {
@@ -442,6 +537,39 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
         }
     }
     Ok(())
+}
+
+/// Do a keybind action. Returns true if the session should end.
+#[allow(clippy::too_many_arguments)]
+fn run_action(
+    a: &keybinds::Action,
+    wl: &mut wayland::State,
+    backend: &mut dyn Backend,
+    cfg: &pancake_config::Config,
+    session: &str,
+    socket: &std::path::Path,
+    launcher: &mut Option<Child>,
+    toggle_launcher: &dyn Fn(&mut Option<Child>),
+) -> bool {
+    use keybinds::Action as A;
+    match a {
+        A::Terminal => match terminal_command(cfg) {
+            Some(cmd) => spawn_command(&cmd, session, socket),
+            None => eprintln!("pancake-compositor: no terminal found (set [apps] terminal = ...)"),
+        },
+        A::Spawn(cmd) => spawn_command(cmd, session, socket),
+        A::Launcher => toggle_launcher(launcher),
+        A::Close => wl.close_focused(),
+        A::ToggleFloating => wl.toggle_floating(),
+        A::Maximize => wl.toggle_maximize(),
+        A::Focus(d) => wl.focus_dir(*d),
+        A::Swap(d) => wl.swap_dir(*d),
+        A::Workspace(n) => wl.switch_workspace(*n),
+        A::MoveToWorkspace(n) => wl.move_to_workspace(*n),
+        A::Quit => return true,
+    }
+    let _ = backend;
+    false
 }
 
 fn run_input(deadline: Option<Instant>) -> Result<(), String> {

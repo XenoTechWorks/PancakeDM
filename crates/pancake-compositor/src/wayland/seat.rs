@@ -127,6 +127,10 @@ impl State {
             }
         }
         self.kb_focus = surface;
+        if let Some(i) = new_root {
+            let ws = self.windows[i].workspace as usize;
+            self.last_focus[ws] = self.windows[i].id;
+        }
         self.send_selection();
     }
 
@@ -228,7 +232,9 @@ impl State {
             // Click to focus and raise (toplevels; menus keep their own focus).
             if let Some(i) = hit.filter(|&i| self.windows[i].toplevel.is_some()) {
                 let surface = self.windows[i].surface.clone();
-                self.raise(i);
+                if self.windows[i].floating {
+                    self.raise(i);
+                }
                 let top = self.windows.iter().position(|w| w.surface == surface).unwrap();
                 self.set_keyboard_focus(Some(surface));
                 if alt && code == BTN_LEFT {
@@ -273,6 +279,18 @@ impl State {
     pub(super) fn start_move(&mut self, i: usize) {
         if self.buttons_down == 0 || self.windows[i].toplevel.is_none() {
             return; // only toplevels, only while a button is held
+        }
+        // Dragging a tiled window pops it out to float, same size, same spot.
+        if !self.windows[i].floating {
+            let frame = self.frame_rect(i);
+            let (ox, oy) = self.origin(i);
+            let w = &mut self.windows[i];
+            w.floating = true;
+            w.maximized = false;
+            w.float_size = Some((frame.2, frame.3));
+            w.x = ox;
+            w.y = oy;
+            self.relayout();
         }
         let (x, y) = self.pointer_pos;
         let w = &self.windows[i];

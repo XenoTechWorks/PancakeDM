@@ -10,6 +10,7 @@
 
 mod data;
 mod layer;
+mod layout;
 mod seat;
 mod shm;
 mod subsurface;
@@ -18,6 +19,7 @@ mod xdg;
 use seat::{Grab, Keyboard};
 use shm::{BufferData, Pool};
 use layer::Layer;
+pub use layout::Style;
 use subsurface::Sub;
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
@@ -130,13 +132,53 @@ struct Window {
     /// (xdg_surface.set_window_geometry).
     geometry: Option<(i32, i32, i32, i32)>,
     placed: bool,
+    // Window management (see layout.rs).
+    workspace: u32,
+    floating: bool,
+    maximized: bool,
+    /// Position in the tiling order.
+    order: u64,
+    activated: bool,
+    /// Where tiling (or maximize) puts its frame; None when floating.
+    tile: Option<(i32, i32, i32, i32)>,
+    /// Size asked for when it floats (None: the app picks).
+    float_size: Option<(i32, i32)>,
+    min_size: (i32, i32),
+    max_size: (i32, i32),
+    /// A dialog (has a parent window): floats.
+    has_parent: bool,
+    last_configure: Option<((i32, i32), Vec<u8>)>,
 }
 
 impl Window {
     fn new(surface: WlSurface, xdg: XdgSurface, toplevel: Option<XdgToplevel>, popup: Option<XdgPopup>, parent: Option<WlSurface>) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self { id, surface, xdg, toplevel, popup, parent, title: String::new(), app_id: String::new(), x: 0, y: 0, geometry: None, placed: false }
+        Self {
+            id,
+            surface,
+            xdg,
+            toplevel,
+            popup,
+            parent,
+            title: String::new(),
+            app_id: String::new(),
+            x: 0,
+            y: 0,
+            geometry: None,
+            placed: false,
+            workspace: 1,
+            floating: false,
+            maximized: false,
+            order: 0,
+            activated: false,
+            tile: None,
+            float_size: None,
+            min_size: (0, 0),
+            max_size: (0, 0),
+            has_parent: false,
+            last_configure: None,
+        }
     }
 }
 
@@ -176,6 +218,11 @@ pub struct State {
     layers: Vec<Layer>,
     /// Screen area not reserved by panels: x, y, w, h.
     usable: (i32, i32, i32, i32),
+    active_ws: u32,
+    /// Per workspace: the window focused there last.
+    last_focus: [u32; 10],
+    style: Style,
+    next_order: u64,
     // Clipboard (see data.rs).
     dh: Option<DisplayHandle>,
     data_devices: Vec<WlDataDevice>,
@@ -206,6 +253,10 @@ impl State {
             subsurfaces: Vec::new(),
             layers: Vec::new(),
             usable: (0, 0, width as i32, height as i32),
+            active_ws: 1,
+            last_focus: [0; 10],
+            style: Style::default(),
+            next_order: 0,
             dh: Some(dh),
             data_devices: Vec::new(),
             selection: None,
@@ -223,38 +274,55 @@ impl State {
         self.in_flight.append(&mut self.frame_callbacks);
         for layer in [layer::BACKGROUND, layer::BOTTOM] {
             for l in self.layers_in(layer) {
-                self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, 0);
+                self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, None, 0);
             }
         }
-        for i in 0..self.windows.len() {
-            if self.windows[i].placed {
-                let (x, y) = self.origin(i);
-                self.draw_tree(canvas, &self.windows[i].surface, x, y, 0);
+        let focused = self.kb_focus.as_ref().and_then(|s| self.root_window(s));
+        for i in self.visible_order() {
+            let (x, y) = self.origin(i);
+            let w = &self.windows[i];
+            if w.popup.is_some() {
+                self.draw_tree(canvas, &w.surface, x, y, None, 0);
+                continue;
+            }
+            // Toplevels: rounded corners (clipping the app's content) and a
+            // border, accent-colored when focused. Maximized: square, none.
+            let frame = self.frame_rect(i);
+            let (radius, border) = if w.maximized { (0, 0) } else { (self.style.radius, self.style.border) };
+            let clip = (radius > 0).then_some((frame.0, frame.1, frame.2, frame.3, radius));
+            self.draw_tree(canvas, &w.surface, x, y, clip, 0);
+            if border > 0 && frame.2 > 0 {
+                let color = if Some(i) == focused { 0xff00_0000 | self.style.accent } else { 0x40ff_ffff };
+                canvas.ring(frame.0 - border, frame.1 - border, frame.2 + 2 * border, frame.3 + 2 * border, radius + border, border, color);
             }
         }
         for layer in [layer::TOP, layer::OVERLAY] {
             for l in self.layers_in(layer) {
-                self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, 0);
+                self.draw_tree(canvas, &l.surface, l.rect.0, l.rect.1, None, 0);
             }
         }
     }
 
     /// A surface and its subsurfaces, with the surface's top-left at (x, y).
-    fn draw_tree(&self, canvas: &mut Canvas, surface: &WlSurface, x: i32, y: i32, depth: u32) {
+    /// `clip` rounds the corners of a screen rect (x, y, w, h, radius).
+    fn draw_tree(&self, canvas: &mut Canvas, surface: &WlSurface, x: i32, y: i32, clip: Option<(i32, i32, i32, i32, i32)>, depth: u32) {
         if depth > 8 {
             return;
         }
         for sub in self.subsurfaces.iter().filter(|s| s.parent == *surface && !s.above) {
-            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, depth + 1);
+            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, clip, depth + 1);
         }
         if let Some(data) = surface.data::<Mutex<SurfaceState>>() {
             let s = data.lock().unwrap();
             if s.width > 0 {
-                canvas.blit(x, y, s.width, s.height, &s.pixels, s.opaque);
+                match clip {
+                    Some(c) => canvas.blit_rounded(x, y, s.width, s.height, &s.pixels, s.opaque, c),
+                    None => canvas.blit(x, y, s.width, s.height, &s.pixels, s.opaque),
+                }
             }
         }
         for sub in self.subsurfaces.iter().filter(|s| s.parent == *surface && s.above) {
-            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, depth + 1);
+            self.draw_tree(canvas, &sub.surface, x + sub.x, y + sub.y, clip, depth + 1);
         }
     }
 
@@ -294,7 +362,7 @@ impl State {
         layer_hit(layer::OVERLAY)
             .or_else(|| layer_hit(layer::TOP))
             .or_else(|| {
-                (0..self.windows.len()).rev().filter(|&i| self.windows[i].placed).find_map(|i| {
+                self.visible_order().into_iter().rev().find_map(|i| {
                     let (ox, oy) = self.origin(i);
                     self.hit_tree(&self.windows[i].surface, ox, oy, x, y, 0).map(|(s, lx, ly)| (Some(i), s, lx, ly))
                 })
@@ -316,6 +384,12 @@ impl State {
         for _ in 0..16 {
             let w = &self.windows[idx];
             let Some(p) = w.parent.as_ref().and_then(|p| self.windows.iter().position(|o| o.surface == *p)) else {
+                // Tiled/maximized: the frame goes in the tile, so the
+                // surface starts at the tile minus the shadow offset.
+                if let Some((tx, ty, _, _)) = w.tile {
+                    let (gx, gy) = self.geom_offset(idx);
+                    return (x + tx - gx, y + ty - gy);
+                }
                 return (x + w.x, y + w.y);
             };
             // Popup: relative to the parent's geometry, minus our own shadow.
@@ -344,18 +418,31 @@ impl State {
             .iter()
             .enumerate()
             .filter(|(_, w)| w.toplevel.is_some() && w.placed)
-            .map(|(i, w)| pancake_ipc::WindowInfo { id: w.id, title: w.title.clone(), focused: Some(i) == focused, app_id: w.app_id.clone() })
+            .map(|(i, w)| pancake_ipc::WindowInfo {
+                id: w.id,
+                title: w.title.clone(),
+                focused: Some(i) == focused,
+                app_id: w.app_id.clone(),
+                workspace: w.workspace,
+            })
             .collect();
         list.sort_by_key(|w| w.id);
         list
     }
 
-    /// Raise and focus a window by id (the panel's window list).
+    /// Raise and focus a window by id (the panel), switching to its workspace.
     pub fn focus_window(&mut self, id: u32) -> bool {
         let Some(i) = self.windows.iter().position(|w| w.id == id && w.toplevel.is_some()) else { return false };
+        let ws = self.windows[i].workspace;
+        self.last_focus[ws as usize] = id;
+        if ws != self.active_ws {
+            self.switch_workspace(ws); // focuses it (remembered above)
+        }
+        let i = self.windows.iter().position(|w| w.id == id).unwrap();
         let surface = self.windows[i].surface.clone();
         self.raise(i);
         self.set_keyboard_focus(Some(surface));
+        self.refresh_pointer_focus();
         true
     }
 
@@ -372,6 +459,19 @@ impl State {
         let Some(i) = self.windows.iter().position(|w| w.surface == *surface && !w.placed && w.toplevel.is_some()) else { return };
         let (w, h) = surface_size(surface);
         if w == 0 {
+            return;
+        }
+        // Dialogs and fixed-size windows float; the rest follow the layout.
+        let fixed = self.windows[i].min_size.0 > 0 && self.windows[i].min_size == self.windows[i].max_size;
+        if !self.windows[i].floating && (fixed || self.windows[i].has_parent) {
+            self.windows[i].floating = true;
+            self.relayout();
+        }
+        if !self.windows[i].floating {
+            self.windows[i].placed = true;
+            let surface = self.windows[i].surface.clone();
+            self.set_keyboard_focus(Some(surface));
+            self.refresh_pointer_focus();
             return;
         }
         let (gx, gy, gw, gh) = self.windows[i].geometry.unwrap_or((0, 0, w, h));

@@ -65,6 +65,14 @@ pub struct WindowInfo {
     pub focused: bool,
     /// The app's id (xdg_toplevel.set_app_id), for finding its icon.
     pub app_id: String,
+    pub workspace: u32,
+}
+
+/// What the `windows` command returns: the active workspace and the windows.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Status {
+    pub active_workspace: u32,
+    pub windows: Vec<WindowInfo>,
 }
 
 // Records are separated by ASCII RS, fields by US, so titles can contain
@@ -72,38 +80,42 @@ pub struct WindowInfo {
 const RS: char = '\u{1e}';
 const US: char = '\u{1f}';
 
-/// Encode a window list for the `windows` reply (after "ok ").
-pub fn encode_windows(windows: &[WindowInfo]) -> String {
-    windows
-        .iter()
-        .map(|w| {
-            let clean = |s: &str| s.chars().filter(|c| *c != RS && *c != US && *c != '\n').collect::<String>();
-            format!("{}{US}{}{US}{}{US}{}", w.id, w.focused as u8, clean(&w.app_id), clean(&w.title))
-        })
+/// Encode the `windows` reply (after "ok "): the active workspace, then
+/// one record per window.
+pub fn encode_status(s: &Status) -> String {
+    let clean = |s: &str| s.chars().filter(|c| *c != RS && *c != US && *c != '\n').collect::<String>();
+    std::iter::once(s.active_workspace.to_string())
+        .chain(s.windows.iter().map(|w| {
+            format!("{}{US}{}{US}{}{US}{}{US}{}", w.id, w.focused as u8, w.workspace, clean(&w.app_id), clean(&w.title))
+        }))
         .collect::<Vec<_>>()
         .join(&RS.to_string())
 }
 
-pub fn decode_windows(reply: &str) -> Vec<WindowInfo> {
+pub fn decode_status(reply: &str) -> Status {
     let body = reply.strip_prefix("ok").unwrap_or(reply).trim_start_matches(' ');
-    body.split(RS)
+    let mut recs = body.split(RS);
+    let active_workspace = recs.next().and_then(|a| a.parse().ok()).unwrap_or(1);
+    let windows = recs
         .filter_map(|rec| {
-            let mut f = rec.splitn(4, US);
+            let mut f = rec.splitn(5, US);
             let id = f.next()?.parse().ok()?;
             let focused = f.next()? == "1";
+            let workspace = f.next()?.parse().ok()?;
             let app_id = f.next().unwrap_or("").to_string();
-            Some(WindowInfo { id, focused, app_id, title: f.next().unwrap_or("").to_string() })
+            Some(WindowInfo { id, focused, workspace, app_id, title: f.next().unwrap_or("").to_string() })
         })
-        .collect()
+        .collect();
+    Status { active_workspace, windows }
 }
 
-/// Ask the compositor for its open windows.
-pub fn windows() -> Result<Vec<WindowInfo>, String> {
+/// Ask the compositor for the active workspace and its open windows.
+pub fn status() -> Result<Status, String> {
     let reply = send("windows")?;
     if !reply.starts_with("ok") {
         return Err(reply);
     }
-    Ok(decode_windows(&reply))
+    Ok(decode_status(&reply))
 }
 
 #[cfg(test)]
@@ -111,12 +123,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_list_round_trips() {
-        let list = vec![
-            WindowInfo { id: 3, title: "Files | Home".into(), focused: false, app_id: "org.gnome.Nautilus".into() },
-            WindowInfo { id: 7, title: "".into(), focused: true, app_id: "".into() },
-        ];
-        assert_eq!(decode_windows(&format!("ok {}", encode_windows(&list))), list);
-        assert_eq!(decode_windows("ok "), vec![]);
+    fn status_round_trips() {
+        let status = Status {
+            active_workspace: 2,
+            windows: vec![
+                WindowInfo { id: 3, title: "Files | Home".into(), focused: false, app_id: "org.gnome.Nautilus".into(), workspace: 1 },
+                WindowInfo { id: 7, title: "".into(), focused: true, app_id: "".into(), workspace: 2 },
+            ],
+        };
+        assert_eq!(decode_status(&format!("ok {}", encode_status(&status))), status);
+        assert_eq!(decode_status("ok 4"), Status { active_workspace: 4, windows: vec![] });
     }
 }

@@ -79,11 +79,8 @@ impl State {
     /// Tell a toplevel whether it's the active (focused) window, so apps
     /// can draw focused and unfocused title bars.
     pub(super) fn send_activated(&mut self, i: usize, active: bool) {
-        let Some(tl) = self.windows[i].toplevel.clone() else { return };
-        let states = if active { (xdg_toplevel::State::Activated as u32).to_ne_bytes().to_vec() } else { Vec::new() };
-        tl.configure(0, 0, states);
-        let serial = self.next_serial();
-        self.windows[i].xdg.configure(serial);
+        self.windows[i].activated = active;
+        self.send_configure(i);
     }
 
     /// Position a popup relative to its parent, kept on screen.
@@ -148,11 +145,14 @@ impl Dispatch<XdgSurface, XdgData> for State {
         match request {
             xdg_surface::Request::GetToplevel { id } => {
                 let toplevel = init.init(id, XdgData { surface: data.surface.clone() });
-                state.windows.push(Window::new(data.surface.clone(), xdg.clone(), Some(toplevel.clone()), None, None));
-                // Let the app pick its own size for now (0x0), then map.
-                toplevel.configure(0, 0, Vec::new());
-                let serial = state.next_serial();
-                xdg.configure(serial);
+                let mut win = Window::new(data.surface.clone(), xdg.clone(), Some(toplevel), None, None);
+                win.workspace = state.active_ws;
+                win.floating = state.style.new_windows_float;
+                win.order = state.next_order;
+                state.next_order += 1;
+                state.windows.push(win);
+                // Tiled: the first configure already carries its tile size.
+                state.relayout();
             }
             xdg_surface::Request::GetPopup { id, parent, positioner } => {
                 let parent = parent.and_then(|p| p.data::<XdgData>().map(|d| d.surface.clone()));
@@ -188,6 +188,33 @@ impl Dispatch<XdgToplevel, XdgData> for State {
                     state.windows[i].title = title;
                 }
             }
+            xdg_toplevel::Request::SetMinSize { width, height } => {
+                if let Some(i) = find(state) {
+                    state.windows[i].min_size = (width, height);
+                }
+            }
+            xdg_toplevel::Request::SetMaxSize { width, height } => {
+                if let Some(i) = find(state) {
+                    state.windows[i].max_size = (width, height);
+                }
+            }
+            xdg_toplevel::Request::SetParent { parent } => {
+                if let Some(i) = find(state) {
+                    state.windows[i].has_parent = parent.is_some();
+                }
+            }
+            xdg_toplevel::Request::SetMaximized => {
+                if let Some(i) = find(state) {
+                    state.windows[i].maximized = true;
+                    state.relayout();
+                }
+            }
+            xdg_toplevel::Request::UnsetMaximized => {
+                if let Some(i) = find(state) {
+                    state.windows[i].maximized = false;
+                    state.relayout();
+                }
+            }
             xdg_toplevel::Request::SetAppId { app_id } => {
                 if let Some(i) = find(state) {
                     state.windows[i].app_id = app_id;
@@ -207,6 +234,7 @@ impl Dispatch<XdgToplevel, XdgData> for State {
         if let Some(i) = state.windows.iter().position(|w| w.toplevel.as_ref() == Some(toplevel)) {
             let surface = state.windows.remove(i).surface;
             state.forget_surface(&surface);
+            state.relayout();
         }
         state.dirty = true;
     }

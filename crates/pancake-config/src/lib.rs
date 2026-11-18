@@ -46,6 +46,14 @@ pub enum PanelPosition {
     Bottom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// New windows tile (dwindle: each splits the last space in half).
+    Tiling,
+    /// New windows float, centered.
+    Floating,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// File name (looked up in the wallpaper folders) or a path; empty = none.
@@ -56,9 +64,23 @@ pub struct Config {
     pub panel_position: PanelPosition,
     pub clock_24h: bool,
     pub show_date: bool,
-    /// 0xRRGGBB, for focus and selection highlights.
+    /// 0xRRGGBB, for focus and selection highlights (when not automatic).
     pub accent: u32,
+    /// Take the accent from the wallpaper.
+    pub accent_auto: bool,
     pub icon_theme: String,
+    pub layout: Layout,
+    /// Space between tiled windows and around them, in pixels.
+    pub gaps: u32,
+    /// Window corner rounding, in pixels (0 = square).
+    pub corner_radius: u32,
+    /// Border around windows, in pixels (0 = none). Accent when focused.
+    pub border: u32,
+    /// Terminal command for the "terminal" action; "auto" finds one.
+    pub terminal: String,
+    /// User keybinds, as written: ("super+return", "terminal"). These
+    /// override the built-in defaults; action "none" removes a default.
+    pub keybinds: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -71,7 +93,14 @@ impl Default for Config {
             clock_24h: true,
             show_date: true,
             accent: 0xf4a259,
+            accent_auto: true,
             icon_theme: "Adwaita".into(),
+            layout: Layout::Tiling,
+            gaps: 10,
+            corner_radius: 12,
+            border: 2,
+            terminal: "auto".into(),
+            keybinds: Vec::new(),
         }
     }
 }
@@ -216,9 +245,35 @@ pub fn parse(text: &str) -> Config {
             .map(|b| c.clock_24h = b)
             .is_some(),
             ("panel", "show-date") => parse_bool(v).map(|b| c.show_date = b).is_some(),
-            ("theme", "accent") => parse_color(v).map(|x| c.accent = x).is_some(),
+            ("theme", "accent") if v == "auto" => {
+                c.accent_auto = true;
+                true
+            }
+            ("theme", "accent") => parse_color(v).map(|x| {
+                c.accent = x;
+                c.accent_auto = false;
+            }).is_some(),
             ("theme", "icon-theme") => {
                 c.icon_theme = v.to_string();
+                true
+            }
+            ("windows", "layout") => match v {
+                "tiling" => Some(Layout::Tiling),
+                "floating" => Some(Layout::Floating),
+                _ => None,
+            }
+            .map(|l| c.layout = l)
+            .is_some(),
+            ("windows", "gaps") => v.parse().ok().filter(|g: &u32| *g <= 200).map(|g| c.gaps = g).is_some(),
+            ("windows", "corner-radius") => v.parse().ok().filter(|r: &u32| *r <= 64).map(|r| c.corner_radius = r).is_some(),
+            ("windows", "border") => v.parse().ok().filter(|b: &u32| *b <= 32).map(|b| c.border = b).is_some(),
+            ("apps", "terminal") => {
+                c.terminal = v.to_string();
+                true
+            }
+            ("keybinds", combo) => {
+                c.keybinds.retain(|(k, _)| k != &combo.to_lowercase());
+                c.keybinds.push((combo.to_lowercase(), v.to_string()));
                 true
             }
             _ => true, // unknown keys are fine (newer or older versions)
@@ -251,16 +306,39 @@ pub fn to_text(c: &Config) -> String {
          show-date = {}\n\
          \n\
          [theme]\n\
-         accent = #{:06x}\n\
-         icon-theme = {}\n",
+         # auto takes it from the wallpaper, or a color like #f4a259\n\
+         accent = {}\n\
+         icon-theme = {}\n\
+         \n\
+         [windows]\n\
+         # tiling or floating\n\
+         layout = {}\n\
+         gaps = {}\n\
+         corner-radius = {}\n\
+         border = {}\n\
+         \n\
+         [apps]\n\
+         terminal = {}\n\
+         \n\
+         [keybinds]\n\
+         # Override or add: combo = action. \"none\" removes a default.\n\
+         # Actions: terminal, launcher, close, toggle-floating, maximize, focus left|right|up|down,\n\
+         # swap left|right|up|down, workspace N, move-to-workspace N, spawn COMMAND, quit\n\
+         {}",
         c.wallpaper,
         c.wallpaper_mode.name(),
         c.background,
         if c.panel_position == PanelPosition::Top { "top" } else { "bottom" },
         if c.clock_24h { "24h" } else { "12h" },
         c.show_date,
-        c.accent,
+        if c.accent_auto { "auto".to_string() } else { format!("#{:06x}", c.accent) },
         c.icon_theme,
+        if c.layout == Layout::Tiling { "tiling" } else { "floating" },
+        c.gaps,
+        c.corner_radius,
+        c.border,
+        c.terminal,
+        c.keybinds.iter().map(|(k, v)| format!("{k} = {v}\n")).collect::<String>(),
     )
 }
 
@@ -342,6 +420,18 @@ mod tests {
         assert!(!c.clock_24h);
         assert!(!c.show_date);
         assert_eq!(c.accent, 0xbc4b51);
+        assert!(!c.accent_auto);
+    }
+
+    #[test]
+    fn windows_apps_and_keybinds() {
+        let c = parse("[windows]\nlayout = floating\ngaps = 4\n[apps]\nterminal = foot\n[keybinds]\nSuper+Return = spawn foot -e htop\nsuper+q = none\nsuper+return = terminal\n");
+        assert_eq!(c.layout, Layout::Floating);
+        assert_eq!(c.gaps, 4);
+        assert_eq!(c.terminal, "foot");
+        // Later lines win; combos are case-insensitive; order is kept.
+        assert_eq!(c.keybinds, vec![("super+q".into(), "none".into()), ("super+return".into(), "terminal".into())]);
+        assert!(parse("[theme]\naccent = auto\n").accent_auto);
     }
 
     #[test]
@@ -358,6 +448,9 @@ mod tests {
         c.panel_position = PanelPosition::Bottom;
         c.clock_24h = false;
         c.accent = 0x3d5a80;
+        c.accent_auto = false;
+        c.layout = Layout::Floating;
+        c.keybinds = vec![("super+t".into(), "spawn foot".into())];
         assert_eq!(parse(&to_text(&c)), c);
     }
 }

@@ -68,6 +68,7 @@ fn builtin_apps() -> Vec<App> {
         exec,
         icon: Some("preferences-desktop".into()),
         wm_class: None,
+        categories: vec!["Settings".into()],
     }]
 }
 
@@ -126,7 +127,7 @@ fn run() -> Result<(), String> {
         tiles: Vec::new(),
         card: (0.0, 0.0, 0.0, 0.0),
         icons: Icons::new(&cfg.icon_theme),
-        accent: 0xff00_0000 | cfg.accent,
+        accent: 0xff00_0000 | pancake_draw::accent::effective(&cfg),
     };
     let mut bufs: Vec<(wl_buffer::WlBuffer, memmap2::MmapMut, (u32, u32))> = Vec::new();
     let fd = conn.backend().poll_fd().as_raw_fd();

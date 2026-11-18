@@ -73,6 +73,111 @@ impl Canvas<'_> {
     }
 }
 
+impl Canvas<'_> {
+    /// Like `blit`, but pixels inside `clip` (x, y, w, h, radius) near its
+    /// corners fade out along the rounded edge. Pixels outside the clip
+    /// rect (e.g. an app's own drop shadow) are drawn as they are.
+    pub fn blit_rounded(&mut self, x: i32, y: i32, w: u32, h: u32, src: &[u32], opaque: bool, clip: (i32, i32, i32, i32, i32)) {
+        let (cx, cy, cw, ch, r) = clip;
+        if r <= 0 || src.len() < (w * h) as usize {
+            return self.blit(x, y, w, h, src, opaque);
+        }
+        let sx0 = (-x).max(0) as u32;
+        let sx1 = w.min((self.width as i32 - x).max(0) as u32);
+        let sy0 = (-y).max(0) as u32;
+        let sy1 = h.min((self.height as i32 - y).max(0) as u32);
+        if sx0 >= sx1 || sy0 >= sy1 {
+            return;
+        }
+        let rf = r as f32;
+        for sy in sy0..sy1 {
+            let py = y + sy as i32;
+            let src_row = &src[(sy * w + sx0) as usize..(sy * w + sx1) as usize];
+            let d0 = py as usize * self.stride + (x + sx0 as i32) as usize;
+            let corner_row = py >= cy && py < cy + ch && (py < cy + r || py >= cy + ch - r);
+            if !corner_row {
+                let dst = &mut self.pixels[d0..d0 + src_row.len()];
+                if opaque {
+                    dst.copy_from_slice(src_row);
+                } else {
+                    for (d, &s) in dst.iter_mut().zip(src_row) {
+                        *d = blend(s, *d);
+                    }
+                }
+                continue;
+            }
+            for (k, &s) in src_row.iter().enumerate() {
+                let px = x + sx0 as i32 + k as i32;
+                let i = d0 + k;
+                let s = if opaque { s | 0xff00_0000 } else { s };
+                let in_corner = px >= cx && px < cx + cw && (px < cx + r || px >= cx + cw - r);
+                if !in_corner {
+                    self.pixels[i] = if opaque { s } else { blend(s, self.pixels[i]) };
+                    continue;
+                }
+                let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+                let ccx = fx.max(cx as f32 + rf).min((cx + cw) as f32 - rf);
+                let ccy = fy.max(cy as f32 + rf).min((cy + ch) as f32 - rf);
+                let d = ((fx - ccx).powi(2) + (fy - ccy).powi(2)).sqrt() - rf;
+                let cover = (0.5 - d).clamp(0.0, 1.0);
+                if cover > 0.0 {
+                    self.pixels[i] = blend(if cover < 1.0 { scale(s, cover) } else { s }, self.pixels[i]);
+                }
+            }
+        }
+    }
+
+    /// An anti-aliased rounded-rectangle outline, `t` pixels thick, drawn
+    /// inside the rect (x, y, w, h).
+    pub fn ring(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, t: i32, color: u32) {
+        let (rf, tf) = (r.max(0) as f32, t as f32);
+        let sdf = |px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32, rad: f32| {
+            let cx = px.max(x0 + rad).min(x1 - rad);
+            let cy = py.max(y0 + rad).min(y1 - rad);
+            let corner = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - rad;
+            let edge = (x0 - px).max(px - x1).max(y0 - py).max(py - y1);
+            if rad > 0.0 { corner.max(edge) } else { edge }
+        };
+        let (x0, y0, x1, y1) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
+        let band = (r.max(0) + t + 1) as i32;
+        let paint = |canvas: &mut Self, px: i32, py: i32| {
+            if px < 0 || py < 0 || px >= canvas.width as i32 || py >= canvas.height as i32 {
+                return;
+            }
+            let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+            let outer = (0.5 - sdf(fx, fy, x0, y0, x1, y1, rf)).clamp(0.0, 1.0);
+            let inner = (0.5 - sdf(fx, fy, x0 + tf, y0 + tf, x1 - tf, y1 - tf, (rf - tf).max(0.0))).clamp(0.0, 1.0);
+            let cover = outer - inner;
+            if cover > 0.0 {
+                let i = py as usize * canvas.stride + px as usize;
+                canvas.pixels[i] = blend(scale(color, cover), canvas.pixels[i]);
+            }
+        };
+        // Only the border band: top and bottom strips, then the sides.
+        for py in y..(y + band).min(y + h) {
+            for px in x..x + w {
+                paint(self, px, py);
+            }
+        }
+        for py in (y + h - band).max(y + band)..y + h {
+            for px in x..x + w {
+                paint(self, px, py);
+            }
+        }
+        for py in (y + band)..(y + h - band) {
+            for px in (x..x + band).chain((x + w - band).max(x + band)..x + w) {
+                paint(self, px, py);
+            }
+        }
+    }
+}
+
+/// Scale a premultiplied pixel by `f` (0..1).
+fn scale(p: u32, f: f32) -> u32 {
+    let ch = |s: u32| ((((p >> s) & 0xff) as f32 * f).round() as u32) << s;
+    ch(24) | ch(16) | ch(8) | ch(0)
+}
+
 /// Premultiplied "over": src + dst * (1 - src alpha).
 fn blend(src: u32, dst: u32) -> u32 {
     let a = src >> 24;
@@ -252,6 +357,24 @@ mod tests {
             0, 0, 0, 0,
             0, 0, 0, 5,
         ]);
+    }
+
+    #[test]
+    fn rounded_blit_cuts_corners_only() {
+        let mut px = vec![0u32; 20 * 20];
+        let img = vec![0xffff_ffffu32; 20 * 20];
+        Canvas::new(&mut px, 20, 20, 20).blit_rounded(0, 0, 20, 20, &img, true, (0, 0, 20, 20, 6));
+        assert_eq!(px[0], 0); // corner cut away
+        assert_eq!(px[10 * 20 + 10], 0xffff_ffff); // middle untouched
+        assert_eq!(px[10], 0xffff_ffff); // top edge middle untouched
+    }
+
+    #[test]
+    fn ring_draws_only_the_outline() {
+        let mut px = vec![0u32; 30 * 30];
+        Canvas::new(&mut px, 30, 30, 30).ring(0, 0, 30, 30, 6, 2, 0xffff_0000);
+        assert!(px[15 * 30] >> 24 > 200); // left edge
+        assert_eq!(px[15 * 30 + 15], 0); // inside stays clear
     }
 
     #[test]

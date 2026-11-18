@@ -1,8 +1,9 @@
 //! The compositor's end of the control socket (see the pancake-ipc crate).
 //!
 //! Commands: `screenshot PATH` (PNG of screen 0's next frame), `windows`
-//! (see pancake_ipc::encode_windows), `focus ID`, `launcher` (open/close
-//! the app launcher), `quit`.
+//! (see pancake_ipc::encode_status), `focus ID`, `launcher` (open/close
+//! the app launcher), `action ...` (any keybind action, e.g. `action
+//! workspace 2`), `quit`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -15,6 +16,7 @@ pub enum Command {
     Windows,
     Focus(u32),
     Launcher,
+    Action(crate::keybinds::Action),
     Quit,
 }
 
@@ -61,6 +63,13 @@ impl Ipc {
                 (Some("focus"), Some(id)) if id.parse::<u32>().is_ok() => Command::Focus(id.parse().unwrap()),
                 (Some("quit"), None) => Command::Quit,
                 (Some("launcher"), None) => Command::Launcher,
+                (Some("action"), Some(_)) => match crate::keybinds::parse_action(line.trim().trim_start_matches("action")) {
+                    Some(a) => Command::Action(a),
+                    None => {
+                        reply(stream, &format!("error unknown action: {}", line.trim()));
+                        continue;
+                    }
+                },
                 _ => {
                     reply(stream, &format!("error unknown command: {}", line.trim()));
                     continue;

@@ -14,6 +14,8 @@ pub struct App {
     pub icon: Option<String>,
     /// StartupWMClass: helps match windows (by app id) to this entry.
     pub wm_class: Option<String>,
+    /// Categories=, e.g. "TerminalEmulator".
+    pub categories: Vec<String>,
 }
 
 /// Where `applications/` folders live, most important first: the user's
@@ -75,6 +77,7 @@ fn collect(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>, depth: u32
 /// listed: hidden, NoDisplay, not an application, or no command.
 pub fn parse(id: &str, text: &str) -> Option<App> {
     let (mut in_entry, mut name, mut exec, mut kind, mut icon, mut wm_class) = (false, None, None, None, None, None);
+    let mut categories = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
@@ -91,6 +94,7 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
             "Type" => kind = Some(v.trim().to_string()),
             "Icon" => icon = Some(v.trim().to_string()).filter(|i| !i.is_empty()),
             "StartupWMClass" => wm_class = Some(v.trim().to_string()),
+            "Categories" => categories = v.split(';').filter(|c| !c.is_empty()).map(|c| c.trim().to_string()).collect(),
             "NoDisplay" | "Hidden" if v.trim() == "true" => return None,
             _ => {}
         }
@@ -102,7 +106,7 @@ pub fn parse(id: &str, text: &str) -> Option<App> {
     if exec.is_empty() {
         return None;
     }
-    Some(App { id: id.to_string(), name: name?, exec, icon, wm_class })
+    Some(App { id: id.to_string(), name: name?, exec, icon, wm_class, categories })
 }
 
 /// The entry for a window's app id: by desktop file id, StartupWMClass,
@@ -119,6 +123,11 @@ pub fn for_app_id<'a>(apps: &'a [App], app_id: &str) -> Option<&'a App> {
         .find(|a| a.id.to_lowercase() == format!("{id}.desktop"))
         .or_else(|| apps.iter().find(|a| a.wm_class.as_deref().is_some_and(|w| w.to_lowercase() == id)))
         .or_else(|| apps.iter().find(|a| program(a) == id))
+}
+
+/// A terminal to open: the first app in the TerminalEmulator category.
+pub fn find_terminal(apps: &[App]) -> Option<&App> {
+    apps.iter().find(|a| a.categories.iter().any(|c| c == "TerminalEmulator"))
 }
 
 /// Remove %f %U etc. (we launch without files); "%%" becomes "%".
@@ -172,7 +181,7 @@ mod tests {
     use super::*;
 
     fn app(name: &str, exec: &str) -> App {
-        App { id: format!("{name}.desktop"), name: name.into(), exec: exec.into(), icon: None, wm_class: None }
+        App { id: format!("{name}.desktop"), name: name.into(), exec: exec.into(), icon: None, wm_class: None, categories: Vec::new() }
     }
 
     #[test]

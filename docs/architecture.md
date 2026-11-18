@@ -89,8 +89,11 @@ Variables you can override: `PREFIX`, `BINDIR`, `DATADIR`, `DESTDIR`,
 session. It's a floating rounded bar anchored to the top through
 `zwlr_layer_shell_v1`, reserving its space so windows open below it.
 
-It shows the Pancake button, a pill per open window (gold = focused;
-click to focus), and the date and time. It draws by hand: rounded
+It's built from "widget islands" (rounded groups, in the spirit of
+DankMaterialShell): the Pancake button; a workspace switcher showing each
+workspace's app icons, with the active one as an accent pill (click to
+switch); the focused window's icon and title; the clock; CPU, memory and
+battery (from /proc and /sys); and the settings button. It draws by hand: rounded
 shapes are its own code, text is rasterized with `fontdue` from the font
 `fc-match sans-serif` finds. The window list comes from the control
 socket (`windows` and `focus ID`, encoded by `pancake-ipc`).
@@ -139,8 +142,20 @@ clock = 24h                   # 24h or 12h
 show-date = true
 
 [theme]
-accent = #f4a259              # focus and selection color
+accent = auto                 # from the wallpaper, or a color like #f4a259
 icon-theme = Adwaita
+
+[windows]
+layout = tiling               # tiling or floating, for new windows
+gaps = 10
+corner-radius = 12
+border = 2
+
+[apps]
+terminal = auto               # or a command, e.g. foot
+
+[keybinds]
+super+t = spawn foot          # add or override; "none" removes a default
 ```
 
 Missing keys get defaults, unknown keys are ignored, bad values keep
@@ -155,6 +170,50 @@ crate), lays it out for the screen size once, and copies it in each
 frame. The default `pancakes.jpg` isn't in the repository (its license
 isn't confirmed for redistribution); drop it, or any image, into the
 wallpaper folder.
+
+## Windows, tiling and workspaces
+
+Windows live on workspaces 1-9. Tiled windows are laid out "dwindle"
+style (each one takes half of the space left, split along the longer
+side) inside the area panels leave free, with `gaps` around and between
+them. Dialogs and windows that can't resize (min size = max size) float;
+so does everything when `layout = floating`. Floating windows sit above
+tiled ones; maximized windows fill the free area.
+
+Tiled apps are told they're tiled (xdg_toplevel tiled states), so GTK
+drops its drop shadows and rounded corners. The compositor rounds every
+window's corners itself (`corner-radius`, clipping the app's content)
+and draws a `border`, in the accent color for the focused window.
+
+Alt+drag moves a window; dragging a tiled one floats it at the same size.
+
+### Keybinds
+
+| Keys | Action |
+|---|---|
+| Super+Return | terminal (`[apps] terminal`, or the first installed TerminalEmulator) |
+| Super+Space, or tap Super | launcher |
+| Super+Q | close |
+| Super+V | toggle floating |
+| Super+F | maximize |
+| Super+arrows / H J K L | focus left/down/up/right |
+| Super+Shift+arrows / H J K L | swap with the window in that direction |
+| Super+1..9 | go to workspace |
+| Super+Shift+1..9 | move the window to a workspace |
+| Super+Shift+E | quit |
+
+Override or add binds in `[keybinds]` (`combo = action`); `none` removes
+one. Actions: `terminal`, `launcher`, `close`, `toggle-floating`,
+`maximize`, `focus DIR`, `swap DIR`, `workspace N`,
+`move-to-workspace N`, `spawn COMMAND`, `quit`. Combos match physical
+keys, so they don't move when the keyboard layout changes. Any action can
+also be run from outside: `pancake-compositor msg action workspace 3`.
+
+## Accent from the wallpaper
+
+With `accent = auto` (the default), the accent is the wallpaper's most
+prominent lively hue (a saturation-weighted hue histogram), tuned to read
+well on dark glass, and cached per wallpaper in `~/.cache/pancake`.
 
 ## Desktop Settings
 

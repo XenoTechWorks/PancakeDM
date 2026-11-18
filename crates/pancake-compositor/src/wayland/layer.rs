@@ -93,8 +93,12 @@ impl State {
                 self.layers[i].resource.configure(serial, rect.2 as u32, rect.3 as u32);
             }
         }
+        let changed = self.usable != usable;
         self.usable = usable;
         self.dirty = true;
+        if changed {
+            self.relayout();
+        }
     }
 
     /// Layer surfaces in one layer, bottom to top.
