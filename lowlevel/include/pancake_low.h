@@ -27,4 +27,37 @@ int pancake_low_fill(pancake_device *dev, uint32_t index, uint32_t xrgb);
 /* Restore the previous screen contents and close the device. */
 void pancake_low_close(pancake_device *dev);
 
+/* ---- Input (libinput) ---- */
+
+typedef void pancake_input;
+
+enum pancake_input_kind {
+    PANCAKE_INPUT_DEVICE_ADDED = 1,
+    PANCAKE_INPUT_DEVICE_REMOVED = 2,
+    PANCAKE_INPUT_KEY = 3,             /* code = evdev key, pressed */
+    PANCAKE_INPUT_MOTION = 4,          /* x, y = relative delta */
+    PANCAKE_INPUT_MOTION_ABSOLUTE = 5, /* x, y = 0..1 of the screen */
+    PANCAKE_INPUT_BUTTON = 6,          /* code = evdev button, pressed */
+    PANCAKE_INPUT_SCROLL = 7,          /* x, y = scroll amount */
+};
+
+struct pancake_input_event {
+    uint32_t kind;
+    uint32_t code;
+    uint32_t pressed;
+    uint32_t _pad;
+    uint64_t time_usec;
+    double x;
+    double y;
+    char name[64]; /* device name, for DEVICE_ADDED/REMOVED */
+};
+
+/* Read input from every device on a seat (NULL = "seat0"). */
+pancake_input *pancake_input_open(const char *seat);
+/* poll() this fd for readability, then drain with pancake_input_next. */
+int pancake_input_fd(pancake_input *in);
+/* 1 = event written to *out, 0 = no more events right now. */
+int pancake_input_next(pancake_input *in, struct pancake_input_event *out);
+void pancake_input_close(pancake_input *in);
+
 #endif

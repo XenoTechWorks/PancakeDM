@@ -2,6 +2,10 @@
 //! Exposed to the Rust compositor through a C ABI (include/pancake_low.h).
 
 const std = @import("std");
+
+comptime {
+    _ = @import("input.zig");
+}
 const c = @cImport({
     @cInclude("xf86drm.h");
     @cInclude("xf86drmMode.h");

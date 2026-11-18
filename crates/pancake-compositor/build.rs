@@ -4,6 +4,8 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", dir.display());
         println!("cargo:rustc-link-lib=static=pancake_low");
         println!("cargo:rustc-link-lib=dylib=drm");
+        println!("cargo:rustc-link-lib=dylib=input");
+        println!("cargo:rustc-link-lib=dylib=udev");
         println!("cargo:rerun-if-changed=../../lowlevel/src");
     }
 }

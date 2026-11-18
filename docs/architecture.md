@@ -31,6 +31,16 @@ PancakeDM works with systemd, elogind, runit, OpenRC, s6 and anything
 else. It never asks users to switch. Seat access goes through logind
 when it's available and seatd otherwise.
 
+## Dependencies
+
+Build: Rust (cargo), Zig 0.13 or newer, make.
+Libraries (with headers): libdrm, libinput, libudev. On KISS or other
+systems without systemd, eudev or libudev-zero provide libudev.
+
+For now the compositor opens input devices directly, so your user needs
+to be in the `input` group (and in `video` for the GPU). Seat handling
+through logind or seatd will replace that.
+
 ## Building
 
 PancakeDM uses a plain POSIX `Makefile` that drives Cargo and Zig, so it
