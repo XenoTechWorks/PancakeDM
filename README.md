@@ -13,7 +13,7 @@ pancakes.
 
 | | |
 |---|---|
-| ![Tiling](docs/screenshots/tiling.png) | ![Control center](docs/screenshots/control-center.png) |
+| ![Tiling](docs/screenshots/tiling.png) |  |
 
 ## What's in it
 
