@@ -45,9 +45,9 @@ desktop; it opens as a window.
   dashboard cost CPU. On a hot or passively cooled CPU, build with
   `make JOBS=1`.
 - Single screen: the cursor and layout use the first output only.
-- No lock screen, notifications, screenshots tool or drag and drop yet.
-- Calendar events are added with `pancake-event` or by editing a text
-  file; there's no click-to-add UI and no reminders yet.
+- No screenshot tool or drag and drop yet.
+- Calendar events can be added from the dashboard or with `pancake-event`;
+  timed and all-day events have desktop reminders.
 - Fractional scaling (125%, 150%) isn't supported.
 - The login screen has only been tested in demo mode, not under a real
   greetd.

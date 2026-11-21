@@ -27,7 +27,7 @@ JOBS        = 2
 PROFILE     = release
 ZIG_BACKEND = auto
 
-BINS = pancake-compositor pancake-panel pancake-launcher pancake-settings pancake-greeter pancake-fetch pancake-event
+BINS = pancake-compositor pancake-panel pancake-launcher pancake-settings pancake-greeter pancake-fetch pancake-event pancake-notifyd
 
 all: build
 

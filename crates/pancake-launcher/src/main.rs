@@ -11,9 +11,7 @@ use pancake_draw::icons::Icons;
 use pancake_draw::{Canvas, Fonts};
 use std::os::fd::{AsFd, AsRawFd};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
-};
+use wayland_client::protocol::{wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use xkbcommon::xkb;
@@ -23,6 +21,15 @@ const CARD: u32 = 0xfa1f1a17;
 const TILE_RING_INNER: u32 = 0xff2b241f;
 const TILE_W: f32 = 124.0;
 const TILE_H: f32 = 116.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum SessionAction {
+    Lock,
+    LogOut,
+    Suspend,
+    Reboot,
+    PowerOff,
+}
 
 // evdev key codes.
 const KEY_ESC: u32 = 1;
@@ -53,6 +60,8 @@ struct Launcher {
     buffer_free: [bool; 2],
     /// Tile rectangles from the last draw, with the result index each shows.
     tiles: Vec<((f32, f32, f32, f32), usize)>,
+    actions: Vec<((f32, f32, f32, f32), SessionAction)>,
+    confirm: Option<SessionAction>,
     card: (f32, f32, f32, f32),
     icons: Icons,
     accent: u32,
@@ -95,8 +104,7 @@ fn run() -> Result<(), String> {
     let qh = queue.handle();
     let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 1..=4, ()).map_err(|e| format!("wl_compositor: {e}"))?;
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).map_err(|e| format!("wl_shm: {e}"))?;
-    let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 =
-        globals.bind(&qh, 1..=4, ()).map_err(|_| "the compositor has no layer shell".to_string())?;
+    let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).map_err(|_| "the compositor has no layer shell".to_string())?;
     let _seat: Option<wl_seat::WlSeat> = globals.bind(&qh, 1..=5, ()).ok();
 
     let surface = compositor.create_surface(&qh, ());
@@ -126,6 +134,8 @@ fn run() -> Result<(), String> {
         launch: None,
         buffer_free: [true; 2],
         tiles: Vec::new(),
+        actions: Vec::new(),
+        confirm: None,
         card: (0.0, 0.0, 0.0, 0.0),
         icons: Icons::new(&cfg.icon_theme),
         accent: 0xff00_0000 | pancake_draw::accent::effective(&cfg),
@@ -193,16 +203,25 @@ fn run() -> Result<(), String> {
 fn launch(app: &App) {
     use std::process::{Command, Stdio};
     eprintln!("pancake-launcher: starting {} ({})", app.name, app.exec);
-    let result = Command::new("sh")
-        .arg("-c")
-        .arg(&app.exec)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let result = Command::new("sh").arg("-c").arg(&app.exec).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     if let Err(e) = result {
         eprintln!("pancake-launcher: can't start {}: {e}", app.name);
     }
+}
+
+fn session_action(action: SessionAction) {
+    match action {
+        SessionAction::Lock => drop(pancake_ipc::send("action lock")),
+        SessionAction::LogOut => drop(pancake_ipc::send("quit")),
+        SessionAction::Suspend => run_quiet("loginctl", &["suspend"]),
+        SessionAction::Reboot => run_quiet("loginctl", &["reboot"]),
+        SessionAction::PowerOff => run_quiet("loginctl", &["poweroff"]),
+    }
+}
+
+fn run_quiet(program: &str, args: &[&str]) {
+    use std::process::{Command, Stdio};
+    let _ = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
 
 /// A stable badge color per app.
@@ -272,6 +291,19 @@ impl Launcher {
         }
         if let Some(&(_, i)) = self.tiles.iter().find(|((tx, ty, tw, th), _)| x >= *tx && x < tx + tw && y >= *ty && y < ty + th) {
             self.launch = Some(i);
+            return;
+        }
+        if let Some(&(_, action)) = self.actions.iter().find(|((tx, ty, tw, th), _)| x >= *tx && x < tx + tw && y >= *ty && y < ty + th) {
+            let destructive = matches!(action, SessionAction::LogOut | SessionAction::Reboot | SessionAction::PowerOff);
+            if destructive && self.confirm != Some(action) {
+                self.confirm = Some(action);
+                self.dirty = true;
+            } else {
+                session_action(action);
+                self.running = false;
+            }
+        } else {
+            self.confirm = None;
         }
     }
 
@@ -281,16 +313,50 @@ impl Launcher {
         c.rounded_rect(0.0, 0.0, w, h, 0.0, BACKDROP);
 
         // The card.
-        let cw = (w - 80.0).min(880.0);
+        let cw = (w - 80.0).min(1040.0);
         let ch = (h - 120.0).min(640.0);
         let (cx, cy) = ((w - cw) / 2.0, (h - ch) / 2.0);
         self.card = (cx, cy, cw, ch);
         c.rounded_rect(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0, 25.0, GLASS_EDGE);
         c.rounded_rect(cx, cy, cw, ch, 24.0, CARD);
 
-        // Search box.
+        // Navigation rail and session controls.
         let pad = 24.0;
-        let (sx, sy, sw, sh) = (cx + pad, cy + pad, cw - pad * 2.0, 48.0);
+        let rail_w = 190.0;
+        c.rounded_rect(cx + 1.0, cy + 1.0, rail_w, ch - 2.0, 23.0, 0xff181411);
+        c.text(fonts, "PancakeDM", cx + 22.0, cy + 38.0, 17.0, true, TEXT);
+        c.text(fonts, "Applications", cx + 22.0, cy + 72.0, 12.0, true, self.accent);
+        c.text(fonts, &format!("{} installed", self.apps.len()), cx + 22.0, cy + 91.0, 11.0, false, TEXT_FAINT);
+
+        self.actions.clear();
+        let action_data = [
+            (SessionAction::Lock, "system-lock-screen-symbolic", "Lock"),
+            (SessionAction::LogOut, "system-log-out-symbolic", "Log out"),
+            (SessionAction::Suspend, "media-playback-pause-symbolic", "Suspend"),
+            (SessionAction::Reboot, "system-reboot-symbolic", "Restart"),
+            (SessionAction::PowerOff, "system-shutdown-symbolic", "Shut down"),
+        ];
+        let mut ay = cy + ch - 226.0;
+        c.text(fonts, "SESSION", cx + 22.0, ay - 14.0, 10.0, true, TEXT_FAINT);
+        for (action, icon, label) in action_data {
+            let r = (cx + 12.0, ay, rail_w - 24.0, 36.0);
+            let hover = inside(self.pointer, r);
+            let confirming = self.confirm == Some(action);
+            if hover || confirming {
+                c.rounded_rect(r.0, r.1, r.2, r.3, 10.0, if confirming { 0x30e8848a } else { SUBTLE });
+            }
+            if let Some(img) = self.icons.symbolic(icon, 16 * self.scale, if confirming { 0xffe8848a } else { TEXT_DIM }) {
+                c.image_alpha(&img, r.0 + 10.0, r.1 + 10.0, 1.0);
+            }
+            let text = if confirming { "Click again to confirm" } else { label };
+            c.text(fonts, text, r.0 + 36.0, r.1 + 23.0, if confirming { 10.0 } else { 12.0 }, confirming, if confirming { 0xffe8848a } else { TEXT });
+            self.actions.push((r, action));
+            ay += 39.0;
+        }
+
+        // Search box on the main content pane.
+        let content_x = cx + rail_w;
+        let (sx, sy, sw, sh) = (content_x + pad, cy + pad, cw - rail_w - pad * 2.0, 48.0);
         c.rounded_rect(sx, sy, sw, sh, 14.0, SUBTLE);
         // A little magnifier: ring and handle.
         c.circle(sx + 24.0, sy + 22.0, 8.0, TEXT_DIM);
@@ -301,13 +367,14 @@ impl Launcher {
             c.text(fonts, "Search apps…", sx + 46.0, baseline, 17.0, false, TEXT_FAINT);
         } else {
             let tw = c.text(fonts, &self.query, sx + 46.0, baseline, 17.0, false, TEXT);
-            c.rounded_rect(sx + 48.0 + tw, sy + 13.0, 2.0, 22.0, 1.0, self.accent); // caret
+            c.rounded_rect(sx + 48.0 + tw, sy + 13.0, 2.0, 22.0, 1.0, self.accent);
+            // caret
         }
 
         // Grid of apps.
-        let gx = cx + pad;
+        let gx = content_x + pad;
         let gy = sy + sh + 20.0;
-        let gw = cw - pad * 2.0;
+        let gw = cw - rail_w - pad * 2.0;
         let gh = cy + ch - gy - 44.0;
         self.columns = ((gw / TILE_W) as usize).max(1);
         self.rows_visible = ((gh / TILE_H) as usize).max(1);
@@ -316,7 +383,7 @@ impl Launcher {
         if self.results.is_empty() {
             let msg = "No apps match";
             let mw = fonts.width(msg, 15.0, false);
-            c.text(fonts, msg, cx + (cw - mw) / 2.0, gy + 60.0, 15.0, false, TEXT_DIM);
+            c.text(fonts, msg, content_x + (cw - rail_w - mw) / 2.0, gy + 60.0, 15.0, false, TEXT_DIM);
         }
         let first = self.scroll_row * self.columns;
         let last = (first + self.columns * self.rows_visible).min(self.results.len());
@@ -355,10 +422,17 @@ impl Launcher {
         }
 
         // Hint line.
-        let hint = format!("{} apps  ·  Arrows to move  ·  Enter to open  ·  Esc to close", self.results.len());
+        let hint = format!("{} results  ·  arrows move  ·  Enter opens  ·  Esc closes", self.results.len());
         let hw = fonts.width(&hint, 12.0, false);
-        c.text(fonts, &hint, cx + (cw - hw) / 2.0, cy + ch - 18.0, 12.0, false, TEXT_FAINT);
+        c.text(fonts, &hint, content_x + (cw - rail_w - hw) / 2.0, cy + ch - 18.0, 12.0, false, TEXT_FAINT);
     }
+}
+
+fn inside(pointer: Option<(f64, f64)>, r: (f32, f32, f32, f32)) -> bool {
+    pointer.is_some_and(|(x, y)| {
+        let (x, y) = (x as f32, y as f32);
+        x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+    })
 }
 
 impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for Launcher {
@@ -379,7 +453,11 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for Launcher {
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for Launcher {
     fn event(st: &mut Self, _: &wl_keyboard::WlKeyboard, event: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         match event {
-            wl_keyboard::Event::Keymap { format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
+            wl_keyboard::Event::Keymap {
+                format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
+                fd,
+                size,
+            } => {
                 let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
                 // Safety: the compositor sent a keymap of `size` bytes.
                 let keymap = unsafe { xkb::Keymap::new_from_fd(&ctx, fd, size as usize, xkb::KEYMAP_FORMAT_TEXT_V1, xkb::KEYMAP_COMPILE_NO_FLAGS) };
@@ -392,7 +470,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Launcher {
                     s.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                 }
             }
-            wl_keyboard::Event::Key { key, state: WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => st.handle_key(key),
+            wl_keyboard::Event::Key {
+                key,
+                state: WEnum::Value(wl_keyboard::KeyState::Pressed),
+                ..
+            } => st.handle_key(key),
             _ => {}
         }
     }
@@ -406,7 +488,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Launcher {
                 st.dirty = true;
             }
             wl_pointer::Event::Leave { .. } => st.pointer = None,
-            wl_pointer::Event::Button { state: WEnum::Value(wl_pointer::ButtonState::Pressed), .. } => st.click = st.pointer,
+            wl_pointer::Event::Button {
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed), ..
+            } => st.click = st.pointer,
             wl_pointer::Event::Axis { value, .. } => {
                 let rows = st.results.len().div_ceil(st.columns.max(1));
                 let max = rows.saturating_sub(st.rows_visible);

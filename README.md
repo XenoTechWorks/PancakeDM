@@ -1,5 +1,7 @@
 # PancakeDM
 
+![Linux: any distro](https://img.shields.io/badge/Linux-any%20distro-blue?logo=linux)
+
 A desktop environment for Linux, written from scratch (Rust, with a little
 Zig for the low-level parts). It isn't based on GNOME, KDE or Budgie. The
 look is warm glass and rounded islands; the goals are the ones KDE gets
@@ -14,6 +16,34 @@ pancakes.
 | | |
 |---|---|
 | ![Tiling](docs/screenshots/tiling.png) | ![Control center](docs/screenshots/control-center.png) |
+| ![Lock screen](docs/screenshots/lock.png) | ![Notifications](docs/screenshots/notifications.png) |
+
+![Calendar reminder](docs/screenshots/reminder.png)
+
+## Linux distributions
+
+PancakeDM is **Linux only** (it uses DRM/KMS, libinput, libseat, `/proc`,
+`/sys` and Linux VTs), but it isn't tied to a distro or init system. Any
+distro with the libraries listed under [Try it](#try-it) can run it;
+systemd, runit, OpenRC, s6 and others are all fine.
+
+The build and tools cover these package-manager families, from KISS Linux
+to Linux Mint:
+
+| Package manager | Examples |
+|---|---|
+| pacman | Arch, Manjaro |
+| dpkg | Debian, Ubuntu, Linux Mint |
+| rpm | Fedora, RHEL, openSUSE |
+| apk | Alpine |
+| xbps | Void |
+| kiss | KISS Linux |
+
+Flatpak apps work alongside any of them. On systems without systemd, use
+elogind or seatd for seats; where libudev is missing (e.g. KISS), eudev or
+libudev-zero provides it. Nested mode only needs a Wayland session; real
+screens need DRM/KMS. Only one x86-64 machine has been tested, so treat the
+table as expected support, not a tested matrix.
 
 ## What's in it
 
@@ -31,6 +61,8 @@ pancakes.
 - **Desktop Settings**: wallpaper, panel, tiling, scale and accent color;
   changes apply live. The accent can follow your wallpaper.
 - **Login screen**: a greetd greeter, in the same style.
+- **Lock screen and notifications**: Ctrl+Alt+L locks the session; app
+  notifications and calendar reminders appear as native, dismissible toasts.
 - **Tools**: `pancake-fetch` (a fastfetch-like summary) and `pancake-event`
   (calendar events).
 
@@ -89,7 +121,16 @@ pancake-event list
 ```
 
 Events show up on the dashboard (a dot under each day, and what's next).
+Click the **+** in the dashboard calendar for guided date, time and title
+entry, or run `pancake-event add` with no other arguments. Timed events notify
+you ten minutes before they start; all-day events remind you in the morning.
 They're a plain text file at `~/.local/share/pancake/events`.
+
+## Media controls
+
+The panel discovers MPRIS players individually and prefers the active player
+(including Spotify) over stale browser sessions. Install `playerctl` to enable
+now-playing metadata and playback controls.
 
 ## Privacy
 

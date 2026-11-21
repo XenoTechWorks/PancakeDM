@@ -1,0 +1,16 @@
+[package]
+name = "pancake-notifyd"
+description = "PancakeDM notifications and calendar reminders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pancake-config.workspace = true
+pancake-draw.workspace = true
+dbus.workspace = true
+dbus-crossroads.workspace = true
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
+memmap2.workspace = true
+chrono.workspace = true

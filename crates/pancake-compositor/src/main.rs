@@ -52,7 +52,11 @@ fn main() -> ExitCode {
         return match pancake_ipc::send(&cmd.join(" ")) {
             Ok(reply) => {
                 println!("{reply}");
-                if reply.starts_with("ok") { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+                if reply.starts_with("ok") {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
             }
             Err(e) => fail(&e),
         };
@@ -112,10 +116,7 @@ fn main() -> ExitCode {
 
 fn print_outputs(outputs: &[low::Output]) {
     for (i, o) in outputs.iter().enumerate() {
-        println!(
-            "{i}: {} {}x{} @ {}.{:03} Hz",
-            o.name, o.width, o.height, o.refresh_mhz / 1000, o.refresh_mhz % 1000
-        );
+        println!("{i}: {} {}x{} @ {}.{:03} Hz", o.name, o.width, o.height, o.refresh_mhz / 1000, o.refresh_mhz % 1000);
     }
 }
 
@@ -254,11 +255,16 @@ fn style_from(cfg: &pancake_config::Config) -> wayland::Style {
 /// Start a shell program (e.g. pancake-panel) connected to this session.
 /// Looks next to our own binary first, then in PATH.
 fn spawn_shell_program(name: &str, wayland_display: &str, socket: &std::path::Path) -> Option<Child> {
+    spawn_shell_program_args(name, &[], wayland_display, socket)
+}
+
+fn spawn_shell_program_args(name: &str, args: &[&str], wayland_display: &str, socket: &std::path::Path) -> Option<Child> {
     let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name))).filter(|p| p.exists());
     let program = beside.unwrap_or_else(|| std::path::PathBuf::from(name));
     // Children (and the apps they start) belong to this session, not to
     // whatever desktop we might be nested in.
     match std::process::Command::new(&program)
+        .args(args)
         .env("WAYLAND_DISPLAY", wayland_display)
         .env("PANCAKE_SOCKET", socket)
         .env("XDG_CURRENT_DESKTOP", "Pancake")
@@ -288,11 +294,9 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
     eprintln!("pancake-compositor: PANCAKE_SOCKET={}", ipc.path().display());
     let _panel = if panel { spawn_shell_program("pancake-panel", &server.name, ipc.path()) } else { None };
     // Login screen mode: the greeter is the whole session.
-    let mut greeter_child = if greeter {
-        Some(spawn_shell_program("pancake-greeter", &server.name, ipc.path()).ok_or("can't start pancake-greeter")?)
-    } else {
-        None
-    };
+    let mut greeter_child = if greeter { Some(spawn_shell_program("pancake-greeter", &server.name, ipc.path()).ok_or("can't start pancake-greeter")?) } else { None };
+    let _notifyd = if panel { spawn_shell_program("pancake-notifyd", &server.name, ipc.path()) } else { None };
+    let mut lock_child: Option<Child> = None;
     let mut launcher: Option<Child> = None;
     // Open the launcher, or close it if it's open.
     let session_name = server.name.clone();
@@ -350,6 +354,28 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                 return Ok(());
             }
         }
+        // Locking: run the lock screen; unlock only when it exits happily
+        // (a crash respawns it, so the screen can't be unlocked by killing it).
+        if wl.take_lock_request() && lock_child.is_none() && !greeter {
+            lock_child = spawn_shell_program_args("pancake-greeter", &["--lock"], &server.name, ipc.path());
+            if lock_child.is_some() {
+                wl.set_locked(true);
+            } else {
+                eprintln!("pancake-compositor: can't start the lock screen, not locking");
+            }
+        }
+        if let Some(c) = lock_child.as_mut() {
+            match c.0.try_wait() {
+                Ok(Some(st)) if st.success() => {
+                    lock_child = None;
+                    wl.set_locked(false);
+                }
+                Ok(Some(_)) | Err(_) => {
+                    lock_child = spawn_shell_program_args("pancake-greeter", &["--lock"], &server.name, ipc.path());
+                }
+                Ok(None) => {}
+            }
+        }
         if last_config_check.elapsed() >= Duration::from_millis(500) {
             last_config_check = Instant::now();
             wl.set_animations(!power.active(&cfg));
@@ -400,11 +426,7 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
         fds.extend([wl_display_fd, server.socket_fd(), ipc.fd()]);
         server.flush();
         // Wake up in time for a frame that's only waiting on the pacing gap.
-        let timeout = (0..count)
-            .filter(|&i| active && dirty[i] && !busy[i])
-            .map(|i| gaps[i].saturating_sub(last_frame[i].elapsed()).as_millis() as i32 + 1)
-            .min()
-            .unwrap_or(100);
+        let timeout = (0..count).filter(|&i| active && dirty[i] && !busy[i]).map(|i| gaps[i].saturating_sub(last_frame[i].elapsed()).as_millis() as i32 + 1).min().unwrap_or(100);
         let ready = low::wait(&fds, timeout);
 
         if ready[nb + 1] {
@@ -421,13 +443,22 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                         dirty[0] = true;
                     }
                     ipc::Command::Windows => {
-                        let status = pancake_ipc::Status { active_workspace: wl.active_workspace(), windows: wl.window_list() };
+                        let status = pancake_ipc::Status {
+                            active_workspace: wl.active_workspace(),
+                            windows: wl.window_list(),
+                        };
                         ipc::reply(stream, &format!("ok {}", pancake_ipc::encode_status(&status)));
                     }
                     ipc::Command::Focus(id) => {
-                        let ok = wl.focus_window(id);
-                        ipc::reply(stream, if ok { "ok" } else { "error no such window" });
+                        if wl.is_locked() {
+                            ipc::reply(stream, "error locked");
+                        } else {
+                            let ok = wl.focus_window(id);
+                            ipc::reply(stream, if ok { "ok" } else { "error no such window" });
+                        }
                     }
+                    ipc::Command::Launcher if wl.is_locked() => ipc::reply(stream, "error locked"),
+                    ipc::Command::Action(_) if wl.is_locked() => ipc::reply(stream, "error locked"),
                     ipc::Command::Launcher => {
                         toggle_launcher(&mut launcher);
                         ipc::reply(stream, "ok");
@@ -492,12 +523,12 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                     }
                     match ev {
                         InputEvent::Key { code, pressed } => {
-                            if mods.update(code, pressed) && !greeter {
+                            if mods.update(code, pressed) && !greeter && !wl.is_locked() {
                                 toggle_launcher(&mut launcher);
                             }
                             // Keybinds: run on press; swallow press and release.
                             // (None on the login screen.)
-                            if pressed && !greeter {
+                            if pressed && !greeter && !wl.is_locked() {
                                 if let Some(a) = binds.lookup(mods.bits(), code).cloned() {
                                     consumed.insert(code);
                                     mods.meta_alone = false;
@@ -515,7 +546,7 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
                                     backend.switch_vt(n);
                                     continue;
                                 }
-                                if code == key::BACKSPACE {
+                                if code == key::BACKSPACE && !wl.is_locked() {
                                     return Ok(());
                                 }
                             }
@@ -566,16 +597,7 @@ fn run_session(backend: &mut dyn Backend, fill: Option<u32>, anim: bool, panel: 
 
 /// Do a keybind action. Returns true if the session should end.
 #[allow(clippy::too_many_arguments)]
-fn run_action(
-    a: &keybinds::Action,
-    wl: &mut wayland::State,
-    backend: &mut dyn Backend,
-    cfg: &pancake_config::Config,
-    session: &str,
-    socket: &std::path::Path,
-    launcher: &mut Option<Child>,
-    toggle_launcher: &dyn Fn(&mut Option<Child>),
-) -> bool {
+fn run_action(a: &keybinds::Action, wl: &mut wayland::State, backend: &mut dyn Backend, cfg: &pancake_config::Config, session: &str, socket: &std::path::Path, launcher: &mut Option<Child>, toggle_launcher: &dyn Fn(&mut Option<Child>)) -> bool {
     use keybinds::Action as A;
     match a {
         A::Terminal => match terminal_command(cfg) {
@@ -591,6 +613,7 @@ fn run_action(
         A::Swap(d) => wl.swap_dir(*d),
         A::Workspace(n) => wl.switch_workspace(*n),
         A::MoveToWorkspace(n) => wl.move_to_workspace(*n),
+        A::Lock => wl.request_lock(),
         A::Quit => return true,
     }
     let _ = backend;

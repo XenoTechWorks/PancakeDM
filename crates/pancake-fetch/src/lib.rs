@@ -16,13 +16,14 @@ pub fn os() -> Option<String> {
 }
 
 pub fn os_from_release(text: &str) -> Option<String> {
-    let field = |k: &str| {
-        text.lines()
-            .find_map(|l| l.strip_prefix(&format!("{k}=")))
-            .map(|v| v.trim().trim_matches('"').to_string())
-            .filter(|v| !v.is_empty())
-    };
+    let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(|v| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty());
     field("PRETTY_NAME").or_else(|| field("NAME"))
+}
+
+/// Stable distro id from os-release ("arch", "ubuntu", "void"...).
+pub fn os_id() -> Option<String> {
+    let text = read("/etc/os-release").or_else(|| read("/usr/lib/os-release"))?;
+    text.lines().find_map(|l| l.strip_prefix("ID=")).map(|v| v.trim().trim_matches('"').to_ascii_lowercase()).filter(|v| !v.is_empty())
 }
 
 /// Icon name for the distro's logo (os-release LOGO=, e.g. "void-logo").
@@ -112,7 +113,9 @@ pub fn disk() -> Option<(u64, u64)> {
 pub fn temperature() -> Option<f32> {
     let mut best: Option<f32> = None;
     for dir in ["/sys/class/hwmon", "/sys/class/thermal"] {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             let name = std::fs::read_to_string(p.join("name")).or_else(|_| std::fs::read_to_string(p.join("type"))).unwrap_or_default();
@@ -155,17 +158,13 @@ pub fn packages() -> Vec<(&'static str, usize)> {
     add("apk", count_lines_starting("/lib/apk/db/installed", "P:"));
     // xbps: one <key>pkgver</key> per package in its database.
     if Path::new("/var/db/xbps").is_dir() {
-        let n = std::fs::read_dir("/var/db/xbps").ok().and_then(|d| {
-            d.flatten()
-                .find(|e| e.file_name().to_string_lossy().starts_with("pkgdb-"))
-                .and_then(|e| std::fs::read_to_string(e.path()).ok())
-                .map(|t| t.matches("<key>pkgver</key>").count())
-        });
+        let n = std::fs::read_dir("/var/db/xbps")
+            .ok()
+            .and_then(|d| d.flatten().find(|e| e.file_name().to_string_lossy().starts_with("pkgdb-")).and_then(|e| std::fs::read_to_string(e.path()).ok()).map(|t| t.matches("<key>pkgver</key>").count()));
         add("xbps", n);
     }
     add("rpm", Command::new("rpm").arg("-qa").output().ok().map(|o| o.stdout.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count()));
-    let flatpaks = ["/var/lib/flatpak/app"].iter().filter_map(|p| count_dirs(p)).sum::<usize>()
-        + std::env::var_os("HOME").and_then(|h| count_dirs(&format!("{}/.local/share/flatpak/app", h.to_string_lossy()))).unwrap_or(0);
+    let flatpaks = ["/var/lib/flatpak/app"].iter().filter_map(|p| count_dirs(p)).sum::<usize>() + std::env::var_os("HOME").and_then(|h| count_dirs(&format!("{}/.local/share/flatpak/app", h.to_string_lossy()))).unwrap_or(0);
     add("flatpak", Some(flatpaks));
     out
 }

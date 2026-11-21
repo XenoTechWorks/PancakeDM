@@ -87,7 +87,9 @@ enum PAction {
     Mute,
     Brightness,
     Settings,
+    AddEvent,
     LogOut,
+    Lock,
     Suspend,
     Reboot,
     PowerOff,
@@ -235,8 +237,7 @@ fn run() -> Result<(), String> {
     let qh = queue.handle();
     let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 1..=4, ()).map_err(|e| format!("wl_compositor: {e}"))?;
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).map_err(|e| format!("wl_shm: {e}"))?;
-    let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 =
-        globals.bind(&qh, 1..=4, ()).map_err(|_| "the compositor has no layer shell (is this PancakeDM?)".to_string())?;
+    let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).map_err(|_| "the compositor has no layer shell (is this PancakeDM?)".to_string())?;
     let _seat: Option<wl_seat::WlSeat> = globals.bind(&qh, 1..=5, ()).ok();
 
     let surface = compositor.create_surface(&qh, ());
@@ -353,7 +354,17 @@ fn run() -> Result<(), String> {
                         app.surface_ids[POPUP] = Some(s.id());
                         app.configured[POPUP] = false;
                         app.buffer_free[POPUP] = [true; 2];
-                        popup = Some(Popup { kind, surface: s, layer: l, bufs: Vec::new(), opened: Instant::now(), closing: None, hits: Vec::new(), confirm: None, drag: None });
+                        popup = Some(Popup {
+                            kind,
+                            surface: s,
+                            layer: l,
+                            bufs: Vec::new(),
+                            opened: Instant::now(),
+                            closing: None,
+                            hits: Vec::new(),
+                            confirm: None,
+                            drag: None,
+                        });
                     }
                     last_poll = Instant::now() - Duration::from_secs(10);
                 }
@@ -456,7 +467,16 @@ fn run() -> Result<(), String> {
                 let px = pancake_draw::pixels(&mut bufs[i].1);
                 let mut canvas = Canvas::new(px, w as i32, h as i32, scale as f32);
                 let open = popup.as_ref().filter(|p| p.closing.is_none()).map(|p| p.kind);
-                let mut ui = Ui { c: &mut canvas, fonts: &mut fonts, icons: &mut icons, art: &mut art, apps: &apps, cfg: &cfg, accent, pointer: app.pointer.filter(|_| app.pointer_on == BAR) };
+                let mut ui = Ui {
+                    c: &mut canvas,
+                    fonts: &mut fonts,
+                    icons: &mut icons,
+                    art: &mut art,
+                    apps: &apps,
+                    cfg: &cfg,
+                    accent,
+                    pointer: app.pointer.filter(|_| app.pointer_on == BAR),
+                };
                 hits = ui.draw_bar(&status, &sys, &info, open);
                 if vis < 1.0 {
                     // Slide toward the screen edge and fade; no clicks meanwhile.
@@ -507,7 +527,16 @@ fn run() -> Result<(), String> {
                 let (kind, open, confirm) = (p.kind, p.openness(), p.confirm);
                 let px = pancake_draw::pixels(&mut p.bufs[i].1);
                 let mut canvas = Canvas::new(px, w as i32, h as i32, scale as f32);
-                let mut ui = Ui { c: &mut canvas, fonts: &mut fonts, icons: &mut icons, art: &mut art, apps: &apps, cfg: &cfg, accent, pointer: app.pointer.filter(|_| app.pointer_on == POPUP) };
+                let mut ui = Ui {
+                    c: &mut canvas,
+                    fonts: &mut fonts,
+                    icons: &mut icons,
+                    art: &mut art,
+                    apps: &apps,
+                    cfg: &cfg,
+                    accent,
+                    pointer: app.pointer.filter(|_| app.pointer_on == POPUP),
+                };
                 let (hits, track) = ui.draw_card(kind, open, confirm, &info, &sys, &fetch, &events);
                 p.hits = hits;
                 if let (Some(t), Some((a, _))) = (track, p.drag) {
@@ -522,7 +551,17 @@ fn run() -> Result<(), String> {
 
         conn.flush().map_err(|e| e.to_string())?;
         let fast = popup.as_ref().is_some_and(|p| p.animating() || p.drag.is_some()) || reveal.animating();
-        let timeout = if fast { if low { 66 } else { 16 } } else if popup.is_some() { 120 } else { 250 };
+        let timeout = if fast {
+            if low {
+                66
+            } else {
+                16
+            }
+        } else if popup.is_some() {
+            120
+        } else {
+            250
+        };
         if let Some(guard) = queue.prepare_read() {
             if pancake_draw::wait_readable(fd, timeout) {
                 // "Would block" just means nothing arrived after all; only
@@ -561,6 +600,14 @@ fn popup_action(p: &mut Popup, a: PAction, r: Rect, x: f32, system: &System, set
             open_settings(settings);
             p.closing.get_or_insert_with(Instant::now);
         }
+        PAction::AddEvent => {
+            open_event_editor();
+            p.closing.get_or_insert_with(Instant::now);
+        }
+        PAction::Lock => {
+            drop(pancake_ipc::send("action lock"));
+            p.closing.get_or_insert_with(Instant::now);
+        }
         PAction::LogOut => drop(pancake_ipc::send("quit")),
         PAction::Suspend => system.act(Cmd::Suspend),
         PAction::Reboot => system.act(Cmd::Reboot),
@@ -579,6 +626,23 @@ fn open_settings(child: &mut Option<std::process::Child>) {
     }
     let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("pancake-settings"))).filter(|p| p.exists());
     *child = std::process::Command::new(beside.unwrap_or_else(|| "pancake-settings".into())).spawn().ok();
+}
+
+fn open_event_editor() {
+    let command = "pancake-event add";
+    let candidates: &[(&str, &[&str])] = &[
+        ("xdg-terminal-exec", &["pancake-event", "add"]),
+        ("foot", &["-e", "pancake-event", "add"]),
+        ("kitty", &["pancake-event", "add"]),
+        ("alacritty", &["-e", "pancake-event", "add"]),
+        ("wezterm", &["start", "--", "pancake-event", "add"]),
+    ];
+    for (program, args) in candidates {
+        if std::process::Command::new(program).args(*args).spawn().is_ok() {
+            return;
+        }
+    }
+    eprintln!("pancake-panel: couldn't open a terminal for `{command}`");
 }
 
 fn inside(p: Option<(f64, f64)>, r: Rect) -> bool {
@@ -663,14 +727,14 @@ impl Ui<'_, '_> {
     }
 
     fn icon_for(&self, app_id: &str) -> Option<String> {
-        pancake_draw::apps::for_app_id(self.apps, app_id)
-            .and_then(|a| a.icon.clone())
-            .or_else(|| (!app_id.is_empty()).then(|| app_id.to_string()))
+        pancake_draw::apps::for_app_id(self.apps, app_id).and_then(|a| a.icon.clone()).or_else(|| (!app_id.is_empty()).then(|| app_id.to_string()))
     }
 
     /// An app icon centered on y_mid.
     fn app_icon(&mut self, app_id: &str, x: f32, y_mid: f32, size: u32) -> bool {
-        let Some(name) = self.icon_for(app_id) else { return false };
+        let Some(name) = self.icon_for(app_id) else {
+            return false;
+        };
         let px = (size as f32 * self.c.scale) as u32;
         match self.icons.get(&name, px) {
             Some(img) => {
@@ -739,9 +803,7 @@ impl Ui<'_, '_> {
 
         // Workspaces.
         let highest = status.windows.iter().map(|w| w.workspace).chain([status.active_workspace, 5]).max().unwrap_or(5);
-        let items: Vec<(u32, Vec<String>)> = (1..=highest)
-            .map(|n| (n, status.windows.iter().filter(|w| w.workspace == n).map(|w| w.app_id.clone()).take(3).collect()))
-            .collect();
+        let items: Vec<(u32, Vec<String>)> = (1..=highest).map(|n| (n, status.windows.iter().filter(|w| w.workspace == n).map(|w| w.app_id.clone()).take(3).collect())).collect();
         let item_w = |apps: &Vec<String>| 26.0 + apps.len() as f32 * 19.0;
         let total: f32 = items.iter().map(|(_, a)| item_w(a)).sum::<f32>() + 8.0;
         let isl = self.island(x, mid, total);
@@ -755,7 +817,13 @@ impl Ui<'_, '_> {
             } else if inside(self.pointer, r) {
                 self.c.rounded_rect(r.0, r.1, r.2, r.3, 9.0, SUBTLE_HOVER);
             }
-            let fg = if active { on_accent } else if app_ids.is_empty() { TEXT_FAINT } else { TEXT };
+            let fg = if active {
+                on_accent
+            } else if app_ids.is_empty() {
+                TEXT_FAINT
+            } else {
+                TEXT
+            };
             self.c.text(self.fonts, &n.to_string(), ix + 9.0, base - 0.5, 13.0, true, fg);
             let mut ax = ix + 22.0;
             for id in app_ids {
@@ -841,7 +909,20 @@ impl Ui<'_, '_> {
         // Right: control center button, status icons, stats.
         let cc = (w - 6.0 - ISLAND_H, mid - ISLAND_H / 2.0, ISLAND_H, ISLAND_H);
         let cc_on = open == Some(PopupKind::Control);
-        self.c.rounded_rect(cc.0, cc.1, cc.2, cc.3, ISLAND_R, if cc_on { accent } else if inside(self.pointer, cc) { SUBTLE_HOVER } else { ISLAND });
+        self.c.rounded_rect(
+            cc.0,
+            cc.1,
+            cc.2,
+            cc.3,
+            ISLAND_R,
+            if cc_on {
+                accent
+            } else if inside(self.pointer, cc) {
+                SUBTLE_HOVER
+            } else {
+                ISLAND
+            },
+        );
         let knob_fg = if cc_on { on_accent } else { TEXT };
         let (sx, sy) = (cc.0 + 8.0, mid - 6.0);
         for (i, knob) in [(0.0, 11.0), (6.0, 4.0), (12.0, 9.0)] {
@@ -929,16 +1010,7 @@ impl Ui<'_, '_> {
     }
 
     /// Draw the open card. Returns its hit areas and the slider tracks.
-    fn draw_card(
-        &mut self,
-        kind: PopupKind,
-        open: f32,
-        confirm: Option<PAction>,
-        info: &Info,
-        sys: &stats::Stats,
-        fetch: &[(&'static str, String)],
-        events: &[pancake_config::events::Event],
-    ) -> (Vec<(Rect, PAction)>, Option<Vec<(PAction, Rect)>>) {
+    fn draw_card(&mut self, kind: PopupKind, open: f32, confirm: Option<PAction>, info: &Info, sys: &stats::Stats, fetch: &[(&'static str, String)], events: &[pancake_config::events::Event]) -> (Vec<(Rect, PAction)>, Option<Vec<(PAction, Rect)>>) {
         let (w, h) = (self.c.w as f32, self.c.h as f32);
         let accent = 0xff00_0000 | self.accent;
         let on_accent = text_on(self.accent);
@@ -972,7 +1044,13 @@ impl Ui<'_, '_> {
                     let mut tx = cx + pad;
                     let mut tile = |ui: &mut Self, label: &str, sub: &str, icon: &str, on: bool, action: PAction, hits: &mut Vec<(Rect, PAction)>| {
                         let r = (tx, y, tw, 72.0);
-                        let bg = if on { accent } else if inside(ui.pointer, r) { SUBTLE_HOVER } else { SUBTLE };
+                        let bg = if on {
+                            accent
+                        } else if inside(ui.pointer, r) {
+                            SUBTLE_HOVER
+                        } else {
+                            SUBTLE
+                        };
                         ui.c.rounded_rect(r.0, r.1, r.2, r.3, 18.0, bg);
                         let fg = if on { on_accent } else { TEXT };
                         ui.c.circle(tx + 26.0, y + 36.0, 16.0, if on { 0x33000000 } else { 0x14ffffff });
@@ -1037,11 +1115,18 @@ impl Ui<'_, '_> {
                     buttons.clear();
                 }
                 buttons.push((PAction::LogOut, "system-log-out-symbolic", "log out"));
+                buttons.push((PAction::Lock, "system-lock-screen-symbolic", "lock"));
                 let mut confirm_text = None;
                 for (a, icon, name) in buttons {
                     let r = (bx, y, 40.0, 40.0);
                     let asking = confirm == Some(a);
-                    let bg = if asking { 0xffbc4b51 } else if inside(self.pointer, r) { SUBTLE_HOVER } else { SUBTLE };
+                    let bg = if asking {
+                        0xffbc4b51
+                    } else if inside(self.pointer, r) {
+                        SUBTLE_HOVER
+                    } else {
+                        SUBTLE
+                    };
                     self.c.circle(bx + 20.0, y + 20.0, 20.0, bg);
                     self.sym(icon, bx + 20.0, y + 20.0, 16.0, TEXT);
                     hits.push((r, a));
@@ -1100,7 +1185,13 @@ impl Ui<'_, '_> {
                         ] {
                             let rad = if big { 22.0 } else { 17.0 };
                             let r = (mid_x + dx - rad, row - rad, rad * 2.0, rad * 2.0);
-                            let bg = if big { accent } else if inside(self.pointer, r) { SUBTLE_HOVER } else { SUBTLE };
+                            let bg = if big {
+                                accent
+                            } else if inside(self.pointer, r) {
+                                SUBTLE_HOVER
+                            } else {
+                                SUBTLE
+                            };
                             self.c.circle(mid_x + dx, row, rad, bg);
                             self.sym(icon, mid_x + dx, row, if big { 20.0 } else { 16.0 }, if big { on_accent } else { TEXT });
                             hits.push((r, action));
@@ -1150,7 +1241,11 @@ impl Ui<'_, '_> {
         } else if c.contains("overcast") {
             "weather-overcast-symbolic"
         } else if c.contains("cloud") {
-            if night { "weather-few-clouds-night-symbolic" } else { "weather-few-clouds-symbolic" }
+            if night {
+                "weather-few-clouds-night-symbolic"
+            } else {
+                "weather-few-clouds-symbolic"
+            }
         } else if night {
             "weather-clear-night-symbolic"
         } else {
@@ -1174,19 +1269,7 @@ impl Ui<'_, '_> {
     /// The dashboard (click the clock): weather, clock, system info,
     /// calendar, performance gauges and media. Returns the card rect.
     #[allow(clippy::too_many_arguments)]
-    fn draw_dashboard(
-        &mut self,
-        w: f32,
-        h: f32,
-        top: bool,
-        below_bar: f32,
-        slide: f32,
-        info: &Info,
-        sys: &stats::Stats,
-        fetch: &[(&'static str, String)],
-        events: &[pancake_config::events::Event],
-        hits: &mut Vec<(Rect, PAction)>,
-    ) -> Rect {
+    fn draw_dashboard(&mut self, w: f32, h: f32, top: bool, below_bar: f32, slide: f32, info: &Info, sys: &stats::Stats, fetch: &[(&'static str, String)], events: &[pancake_config::events::Event], hits: &mut Vec<(Rect, PAction)>) -> Rect {
         let accent = 0xff00_0000 | self.accent;
         let on_accent = text_on(self.accent);
         let (pad, gap) = (14.0, 10.0);
@@ -1279,6 +1362,11 @@ impl Ui<'_, '_> {
         self.tile(r);
         let month = now.format("%B %Y").to_string();
         self.c.text(self.fonts, &month, r.0 + 14.0, r.1 + 22.0, 13.0, true, TEXT);
+        let add = (r.0 + r.2 - 34.0, r.1 + 7.0, 24.0, 24.0);
+        self.c.circle(add.0 + 12.0, add.1 + 12.0, 12.0, if inside(self.pointer, add) { SUBTLE_HOVER } else { SUBTLE });
+        let pw = self.fonts.width("+", 17.0, true);
+        self.c.text(self.fonts, "+", add.0 + 12.0 - pw / 2.0, add.1 + 18.0, 17.0, true, TEXT);
+        hits.push((add, PAction::AddEvent));
         let today = now.date_naive();
         let first = chrono::NaiveDate::from_ymd_opt(chrono::Datelike::year(&today), chrono::Datelike::month(&today), 1).unwrap();
         let lead = chrono::Datelike::weekday(&first).num_days_from_sunday() as i32;
@@ -1307,7 +1395,13 @@ impl Ui<'_, '_> {
             if events.iter().any(|e| e.date == date) {
                 self.c.circle(dx + cell_w / 2.0, dy + 16.5, 1.8, if d == day_today { on_accent } else { accent });
             }
-            let fg = if d == day_today { on_accent } else if col == 0 || col == 6 { TEXT_DIM } else { TEXT };
+            let fg = if d == day_today {
+                on_accent
+            } else if col == 0 || col == 6 {
+                TEXT_DIM
+            } else {
+                TEXT
+            };
             self.c.text(self.fonts, &label, dx + (cell_w - lw) / 2.0, dy + 12.0, 11.0, d == day_today, fg);
         }
 
@@ -1377,7 +1471,13 @@ impl Ui<'_, '_> {
                 ] {
                     let rad = if big { 20.0 } else { 15.0 };
                     let br = (vx + dx - rad, row - rad, rad * 2.0, rad * 2.0);
-                    let bg = if big { accent } else if inside(self.pointer, br) { SUBTLE_HOVER } else { SUBTLE };
+                    let bg = if big {
+                        accent
+                    } else if inside(self.pointer, br) {
+                        SUBTLE_HOVER
+                    } else {
+                        SUBTLE
+                    };
                     self.c.circle(vx + dx, row, rad, bg);
                     self.sym(icon, vx + dx, row, if big { 18.0 } else { 14.0 }, if big { on_accent } else { TEXT });
                     hits.push((br, action));

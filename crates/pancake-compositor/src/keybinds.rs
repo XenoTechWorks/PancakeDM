@@ -27,6 +27,7 @@ pub enum Action {
     Workspace(u32),
     MoveToWorkspace(u32),
     Spawn(String),
+    Lock,
     Quit,
 }
 
@@ -72,6 +73,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("super+shift+8", "move-to-workspace 8"),
     ("super+shift+9", "move-to-workspace 9"),
     ("super+shift+e", "quit"),
+    ("ctrl+alt+l", "lock"),
 ];
 
 fn dir(s: &str) -> Option<Dir> {
@@ -95,6 +97,7 @@ pub fn parse_action(s: &str) -> Option<Action> {
         ("toggle-floating", "") => Action::ToggleFloating,
         ("maximize", "") => Action::Maximize,
         ("quit", "") => Action::Quit,
+        ("lock", "") => Action::Lock,
         ("focus", d) => Action::Focus(dir(d)?),
         ("swap", d) => Action::Swap(dir(d)?),
         ("workspace", n) => Action::Workspace(ws(n)?),
@@ -244,11 +247,7 @@ mod tests {
 
     #[test]
     fn user_binds_override_and_remove_defaults() {
-        let user = vec![
-            ("super+return".to_string(), "spawn foot".to_string()),
-            ("super+q".to_string(), "none".to_string()),
-            ("super+zz".to_string(), "close".to_string()),
-        ];
+        let user = vec![("super+return".to_string(), "spawn foot".to_string()), ("super+q".to_string(), "none".to_string()), ("super+zz".to_string(), "close".to_string())];
         let (k, warnings) = Keybinds::from_config(&user);
         assert_eq!(k.lookup(SUPER, 28), Some(&Action::Spawn("foot".into())));
         assert_eq!(k.lookup(SUPER, 16), None);

@@ -32,7 +32,11 @@ impl Media {
     /// Position now (it keeps moving between samples while playing).
     pub fn position_now(&self) -> f64 {
         let p = if self.playing { self.position + self.sampled.elapsed().as_secs_f64() } else { self.position };
-        if self.length > 0.0 { p.min(self.length) } else { p }
+        if self.length > 0.0 {
+            p.min(self.length)
+        } else {
+            p
+        }
     }
 }
 
@@ -84,9 +88,7 @@ pub enum Cmd {
 }
 
 fn have(tool: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
-        .unwrap_or(false)
+    std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file())).unwrap_or(false)
 }
 
 fn output(cmd: &str, args: &[&str]) -> Option<String> {
@@ -254,7 +256,30 @@ fn player_cmd(player: &Option<String>, what: &str) {
 
 fn poll_media(art_cache: &mut Option<(String, Option<PathBuf>)>) -> Option<Media> {
     let fmt = "{{playerName}}\t{{status}}\t{{artist}}\t{{title}}\t{{mpris:artUrl}}\t{{mpris:length}}\t{{position}}\t{{playerInstance}}";
-    let out = output("playerctl", &["-a", "metadata", "--format", fmt])?;
+    // Query each advertised MPRIS name explicitly.  `playerctl -a metadata`
+    // aborts the whole request on some versions when one stale browser player
+    // disappears mid-query; Spotify then looks invisible even though it is on
+    // the bus.  `-l` gives us the exact instance names controls need too.
+    let players = output("playerctl", &["-l"])?;
+    let mut lines = Vec::new();
+    for player in players.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(line) = output("playerctl", &["-p", player, "metadata", "--format", fmt]) {
+            let line = line.trim();
+            if !line.is_empty() {
+                // Older playerctl releases do not expand playerInstance.  Use
+                // the name from `-l`, which is always the controllable name.
+                let mut fields: Vec<&str> = line.split('\t').collect();
+                if fields.len() < 8 || fields[7].trim().is_empty() {
+                    fields.resize(8, "");
+                    fields[7] = player;
+                    lines.push(fields.join("\t"));
+                } else {
+                    lines.push(line.to_string());
+                }
+            }
+        }
+    }
+    let out = lines.join("\n");
     let mut media = pick_player(&out)?;
     let url = media.art.take().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     // Art: local files as they are; URLs downloaded once (needs curl).
@@ -276,7 +301,13 @@ fn poll_media(art_cache: &mut Option<(String, Option<PathBuf>)>) -> Option<Media
 /// paused one. So Spotify shows up even when a browser tab is open too.
 pub fn pick_player(out: &str) -> Option<Media> {
     let all: Vec<Media> = out.lines().filter_map(parse_media).collect();
-    let i = all.iter().position(|m| m.playing).or(if all.is_empty() { None } else { Some(0) })?;
+    // Prefer a playing player.  If all are paused, prefer Spotify over stale
+    // browser MPRIS sessions, then fall back to the first real player.
+    let i = all
+        .iter()
+        .position(|m| m.playing)
+        .or_else(|| all.iter().position(|m| m.player.eq_ignore_ascii_case("spotify") || m.instance.to_ascii_lowercase().starts_with("spotify")))
+        .or(if all.is_empty() { None } else { Some(0) })?;
     all.into_iter().nth(i)
 }
 
@@ -306,21 +337,12 @@ pub fn parse_media(line: &str) -> Option<Media> {
 }
 
 fn download_art(url: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
-        .join("pancake/art");
+    let dir = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?.join("pancake/art");
     std::fs::create_dir_all(&dir).ok()?;
     let key = url.bytes().fold(5381u64, |h, b| h.wrapping_mul(33) ^ b as u64);
     let path = dir.join(format!("{key:016x}"));
     if !path.exists() {
-        let ok = Command::new("curl")
-            .args(["-sfL", "--max-time", "5", "-o"])
-            .arg(&path)
-            .arg(url)
-            .stdin(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
+        let ok = Command::new("curl").args(["-sfL", "--max-time", "5", "-o"]).arg(&path).arg(url).stdin(Stdio::null()).status().is_ok_and(|s| s.success());
         if !ok {
             let _ = std::fs::remove_file(&path);
             return None;
@@ -432,6 +454,7 @@ mod tests {
         assert_eq!((m.player.as_str(), m.instance.as_str()), ("spotify", "spotify"));
         // Nothing playing: first paused one.
         assert_eq!(pick_player("a\tPaused\tx\tT\t\t0\t0\ta\nb\tPaused\tx\tU\t\t0\t0\tb\n").unwrap().player, "a");
+        assert_eq!(pick_player("firefox\tPaused\tx\tTab\t\t0\t0\tfirefox.instance\nspotify\tPaused\tx\tSong\t\t0\t0\tspotify\n").unwrap().player, "spotify");
     }
 
     #[test]

@@ -25,15 +25,19 @@ impl Keyboard {
     /// or the system default, so the user's layout setting is respected.
     pub fn new() -> Result<Self, String> {
         let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        let keymap = xkb::Keymap::new_from_names(&ctx, "", "", "", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
-            .ok_or("can't load a keyboard layout (is xkeyboard-config installed?)")?;
+        let keymap = xkb::Keymap::new_from_names(&ctx, "", "", "", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS).ok_or("can't load a keyboard layout (is xkeyboard-config installed?)")?;
         let text = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
         let dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR isn't set")?;
         let path = std::path::Path::new(&dir).join(format!("pancake-keymap-{}", std::process::id()));
         let mut file = File::options().read(true).write(true).create(true).truncate(true).open(&path).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&path);
         file.write_all(text.as_bytes()).and_then(|_| file.write_all(&[0])).map_err(|e| e.to_string())?;
-        Ok(Self { file, size: text.len() as u32 + 1, state: xkb::State::new(&keymap), pressed: Vec::new() })
+        Ok(Self {
+            file,
+            size: text.len() as u32 + 1,
+            state: xkb::State::new(&keymap),
+            pressed: Vec::new(),
+        })
     }
 
     fn mods(&self) -> (u32, u32, u32, u32) {
@@ -147,7 +151,13 @@ impl State {
             k.pressed.retain(|&c| c != code);
         }
         let mods = k.mods();
-        let Some(focus) = self.kb_focus.clone() else { return };
+        let Some(focus) = self.kb_focus.clone() else {
+            return;
+        };
+        // Locked: only the lock overlay may get keys.
+        if self.locked && !self.layers.iter().any(|l| l.surface == focus) {
+            return;
+        }
         let (serial, time) = (self.next_serial(), self.time_ms());
         let state = if pressed { wl_keyboard::KeyState::Pressed } else { wl_keyboard::KeyState::Released };
         for kb in self.keyboards.iter().filter(|kb| kb.is_alive() && same_client(*kb, &focus)) {
@@ -243,7 +253,9 @@ impl State {
                 }
             }
         }
-        let Some(focus) = self.pointer_focus.clone() else { return };
+        let Some(focus) = self.pointer_focus.clone() else {
+            return;
+        };
         let (serial, time) = (self.next_serial(), self.time_ms());
         let state = if pressed { wl_pointer::ButtonState::Pressed } else { wl_pointer::ButtonState::Released };
         for p in self.pointers_for(&focus) {
@@ -253,7 +265,9 @@ impl State {
     }
 
     pub fn pointer_axis(&mut self, dx: f64, dy: f64) {
-        let Some(focus) = self.pointer_focus.clone() else { return };
+        let Some(focus) = self.pointer_focus.clone() else {
+            return;
+        };
         let time = self.time_ms();
         for p in self.pointers_for(&focus) {
             if dy != 0.0 {
@@ -294,7 +308,11 @@ impl State {
         }
         let (x, y) = self.pointer_pos;
         let w = &self.windows[i];
-        self.grab = Some(Grab { surface: w.surface.clone(), dx: x as i32 - w.x, dy: y as i32 - w.y });
+        self.grab = Some(Grab {
+            surface: w.surface.clone(),
+            dx: x as i32 - w.x,
+            dy: y as i32 - w.y,
+        });
         // The app shouldn't see the drag as pointer input.
         if let Some(old) = self.pointer_focus.take() {
             let serial = self.next_serial();

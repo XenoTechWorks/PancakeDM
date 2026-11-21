@@ -11,6 +11,7 @@ members = [
     "crates/pancake-launcher",
     "crates/pancake-fetch",
     "crates/pancake-greeter",
+    "crates/pancake-notifyd",
 ]
 
 [workspace.package]
@@ -28,6 +29,8 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "client"] }
 memmap2 = "0.9"
 xkbcommon = "0.8"
+dbus = "0.9"
+dbus-crossroads = "0.5"
 wayland-protocols-wlr = { version = "0.3", features = ["server", "client"] }
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

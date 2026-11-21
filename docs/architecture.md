@@ -89,8 +89,8 @@ Variables you can override: `PREFIX`, `BINDIR`, `DATADIR`, `DESTDIR`,
 session. It's a floating rounded bar anchored to the top through
 `zwlr_layer_shell_v1`, reserving its space so windows open below it.
 
-Its launcher button shows the PancakeDM logo (`data/icons/pancakedm.svg`,
-built into pancake-draw and installed as the `pancakedm` icon). It's built from "widget islands" (rounded groups, in the spirit of
+Its launcher button uses the current icon theme's app-grid symbol; the shell
+does not generate a Pancake SVG. It's built from "widget islands" (rounded groups, in the spirit of
 DankMaterialShell): the Pancake button; a workspace switcher showing each
 workspace's app icons, with the active one as an accent pill (click to
 switch); the focused window's icon and title; the clock; CPU, memory and

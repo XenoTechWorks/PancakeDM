@@ -8,24 +8,23 @@
 //! (pointer + keyboard), wl_data_device_manager (copy/paste), xdg_wm_base
 //! (windows and popups).
 
+mod anim;
 mod data;
 mod layer;
 mod layout;
-mod anim;
 mod seat;
 mod shm;
 mod subsurface;
 mod xdg;
 
-use seat::{Grab, Keyboard};
-use shm::{BufferData, Pool};
 use layer::Layer;
 pub use layout::Style;
-use subsurface::Sub;
+use seat::{Grab, Keyboard};
+use shm::{BufferData, Pool};
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
+use subsurface::Sub;
 use wayland_protocols::xdg::shell::server::{xdg_popup::XdgPopup, xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase};
-use wayland_server::protocol::{wl_data_device::WlDataDevice, wl_data_device_manager::WlDataDeviceManager, wl_data_source::WlDataSource, wl_subcompositor::WlSubcompositor};
 use wayland_server::backend::{ClientData, ClientId};
 use wayland_server::protocol::{
     wl_buffer::{self, WlBuffer},
@@ -41,9 +40,8 @@ use wayland_server::protocol::{
     wl_surface::{self, WlSurface},
     wl_touch::{self, WlTouch},
 };
-use wayland_server::{
-    Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, ListeningSocket, New, Resource,
-};
+use wayland_server::protocol::{wl_data_device::WlDataDevice, wl_data_device_manager::WlDataDeviceManager, wl_data_source::WlDataSource, wl_subcompositor::WlSubcompositor};
+use wayland_server::{Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, ListeningSocket, New, Resource};
 
 use crate::render::Canvas;
 
@@ -66,8 +64,7 @@ impl Server {
         dh.create_global::<State, WlSeat, ()>(5, ());
         dh.create_global::<State, XdgWmBase, ()>(3, ());
         dh.create_global::<State, wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::ZwlrLayerShellV1, ()>(4, ());
-        let socket = ListeningSocket::bind_auto("wayland", 1..33)
-            .map_err(|e| format!("can't create the Wayland socket: {e:?}"))?;
+        let socket = ListeningSocket::bind_auto("wayland", 1..33).map_err(|e| format!("can't create the Wayland socket: {e:?}"))?;
         let name = socket.socket_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         Ok(Self { display, socket, name })
     }
@@ -236,6 +233,9 @@ pub struct State {
     ghosts: Vec<anim::Ghost>,
     /// Off in low-power mode.
     pub(super) animations: bool,
+    /// Screen locked: only the lock overlay is drawn and gets input.
+    locked: bool,
+    lock_requested: bool,
     /// Workspace switch slide: (from workspace, direction, start).
     ws_anim: Option<(u32, i32, std::time::Instant)>,
     // Clipboard (see data.rs).
@@ -255,9 +255,7 @@ impl State {
             serial: 0,
             placed_count: 0,
             started: std::time::Instant::now(),
-            keyboard: Keyboard::new()
-                .map_err(|e| eprintln!("pancake-compositor: {e}; apps get no keyboard"))
-                .ok(),
+            keyboard: Keyboard::new().map_err(|e| eprintln!("pancake-compositor: {e}; apps get no keyboard")).ok(),
             keyboards: Vec::new(),
             pointers: Vec::new(),
             kb_focus: None,
@@ -276,6 +274,8 @@ impl State {
             outputs: Vec::new(),
             ghosts: Vec::new(),
             animations: true,
+            locked: false,
+            lock_requested: false,
             ws_anim: None,
             dh: Some(dh),
             data_devices: Vec::new(),
@@ -299,6 +299,12 @@ impl State {
         }
         // Windows: during a workspace switch, the old workspace slides out
         // while the new one slides in.
+        if self.locked {
+            for l in self.layers_in(layer::OVERLAY) {
+                self.draw_tree_a(canvas, &l.surface, l.rect.0, l.rect.1, None, 1.0, 0);
+            }
+            return;
+        }
         match self.ws_slide() {
             Some((from, out_dx, in_dx)) => {
                 self.draw_windows(canvas, &self.order_for(from, false), out_dx);
@@ -372,6 +378,9 @@ impl State {
             let ls: Vec<&Layer> = self.layers_in(layer).collect();
             ls.into_iter().rev().find_map(|l| self.hit_tree(&l.surface, l.rect.0, l.rect.1, x, y, 0)).map(|(s, lx, ly)| (None, s, lx, ly))
         };
+        if self.locked {
+            return layer_hit(layer::OVERLAY);
+        }
         layer_hit(layer::OVERLAY)
             .or_else(|| layer_hit(layer::TOP))
             .or_else(|| {
@@ -448,7 +457,9 @@ impl State {
 
     /// Raise and focus a window by id (the panel), switching to its workspace.
     pub fn focus_window(&mut self, id: u32) -> bool {
-        let Some(i) = self.windows.iter().position(|w| w.id == id && w.toplevel.is_some()) else { return false };
+        let Some(i) = self.windows.iter().position(|w| w.id == id && w.toplevel.is_some()) else {
+            return false;
+        };
         let ws = self.windows[i].workspace;
         self.last_focus[ws as usize] = id;
         if ws != self.active_ws {
@@ -487,6 +498,35 @@ impl State {
         self.relayout();
     }
 
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    pub fn request_lock(&mut self) {
+        self.lock_requested = true;
+    }
+
+    pub fn take_lock_request(&mut self) -> bool {
+        std::mem::take(&mut self.lock_requested)
+    }
+
+    /// Lock or unlock. Locking drops keyboard focus and open menus, so
+    /// nothing behind the lock screen keeps receiving input.
+    pub fn set_locked(&mut self, locked: bool) {
+        if locked == self.locked {
+            return;
+        }
+        self.locked = locked;
+        if locked {
+            self.dismiss_popups();
+            self.set_keyboard_focus(None);
+        } else {
+            self.ghosts.clear();
+            self.focus_after_unlock();
+        }
+        self.dirty = true;
+    }
+
     pub fn set_animations(&mut self, on: bool) {
         if on != self.animations {
             self.animations = on;
@@ -505,7 +545,9 @@ impl State {
     /// Centering uses the window geometry, so drop shadows don't count.
     fn place_window(&mut self, surface: &WlSurface) {
         let (ow, oh, _) = self.output;
-        let Some(i) = self.windows.iter().position(|w| w.surface == *surface && !w.placed && w.toplevel.is_some()) else { return };
+        let Some(i) = self.windows.iter().position(|w| w.surface == *surface && !w.placed && w.toplevel.is_some()) else {
+            return;
+        };
         let (w, h) = surface_size(surface);
         if w == 0 {
             return;
@@ -762,4 +804,3 @@ impl Dispatch<WlKeyboard, ()> for State {
 impl Dispatch<WlTouch, ()> for State {
     fn request(_: &mut Self, _: &Client, _: &WlTouch, _: wl_touch::Request, _: &(), _: &DisplayHandle, _: &mut DataInit<'_, Self>) {}
 }
-

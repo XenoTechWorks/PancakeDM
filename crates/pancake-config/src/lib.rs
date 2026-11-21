@@ -161,12 +161,10 @@ pub fn wallpaper_dirs() -> Vec<PathBuf> {
 pub fn list_wallpapers() -> Vec<PathBuf> {
     let mut out = Vec::new();
     for d in wallpaper_dirs() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
-        let mut found: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| ["jpg", "jpeg", "png"].iter().any(|e| x.eq_ignore_ascii_case(e))))
-            .collect();
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        let mut found: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| ["jpg", "jpeg", "png"].iter().any(|e| x.eq_ignore_ascii_case(e)))).collect();
         found.sort();
         for p in found {
             if !out.iter().any(|o: &PathBuf| o.file_name() == p.file_name()) {
@@ -285,10 +283,12 @@ pub fn parse(text: &str) -> Config {
                 c.accent_auto = true;
                 true
             }
-            ("theme", "accent") => parse_color(v).map(|x| {
-                c.accent = x;
-                c.accent_auto = false;
-            }).is_some(),
+            ("theme", "accent") => parse_color(v)
+                .map(|x| {
+                    c.accent = x;
+                    c.accent_auto = false;
+                })
+                .is_some(),
             ("theme", "icon-theme") => {
                 c.icon_theme = v.to_string();
                 true
@@ -366,7 +366,7 @@ pub fn to_text(c: &Config) -> String {
          \n\
          [keybinds]\n\
          # Override or add: combo = action. \"none\" removes a default.\n\
-         # Actions: terminal, launcher, close, toggle-floating, maximize, focus left|right|up|down,\n\
+         # Actions: terminal, launcher, lock, close, toggle-floating, maximize, focus left|right|up|down,\n\
          # swap left|right|up|down, workspace N, move-to-workspace N, spawn COMMAND, quit\n\
          {}",
         c.wallpaper,
@@ -376,7 +376,11 @@ pub fn to_text(c: &Config) -> String {
         if c.panel_position == PanelPosition::Top { "top" } else { "bottom" },
         if c.clock_24h { "24h" } else { "12h" },
         c.show_date,
-        match c.low_power { LowPower::Auto => "auto", LowPower::On => "on", LowPower::Off => "off" },
+        match c.low_power {
+            LowPower::Auto => "auto",
+            LowPower::On => "on",
+            LowPower::Off => "off",
+        },
         c.weather,
         c.weather_location,
         if c.accent_auto { "auto".to_string() } else { format!("#{:06x}", c.accent) },

@@ -70,7 +70,13 @@ pub struct Style {
 
 impl Default for Style {
     fn default() -> Self {
-        Self { gaps: 10, radius: 12, border: 2, accent: 0xf4a259, new_windows_float: false }
+        Self {
+            gaps: 10,
+            radius: 12,
+            border: 2,
+            accent: 0xf4a259,
+            new_windows_float: false,
+        }
     }
 }
 
@@ -100,8 +106,7 @@ impl State {
         let (ux, uy, uw, uh) = self.usable;
         let g = self.style.gaps;
         // Where each window is now, so moved tiles can glide from there.
-        let before: Vec<Option<(i32, i32)>> =
-            (0..self.windows.len()).map(|i| (self.windows[i].placed && self.windows[i].tile.is_some()).then(|| self.origin(i))).collect();
+        let before: Vec<Option<(i32, i32)>> = (0..self.windows.len()).map(|i| (self.windows[i].placed && self.windows[i].tile.is_some()).then(|| self.origin(i))).collect();
         let old_tiles: Vec<Option<Rect>> = self.windows.iter().map(|w| w.tile).collect();
         for ws in 1..=9 {
             let mut tiled: Vec<usize> = (0..self.windows.len()).filter(|&i| self.windows[i].workspace == ws && self.is_tiled(i)).collect();
@@ -221,8 +226,14 @@ impl State {
         }
     }
 
+    pub(super) fn focus_after_unlock(&mut self) {
+        self.focus_something();
+    }
+
     pub fn focus_dir(&mut self, dir: Dir) {
-        let Some(cur) = self.focused_toplevel() else { return self.focus_something() };
+        let Some(cur) = self.focused_toplevel() else {
+            return self.focus_something();
+        };
         let cands: Vec<usize> = self.visible_order().into_iter().filter(|&i| i != cur && self.windows[i].toplevel.is_some()).collect();
         let rects: Vec<Rect> = cands.iter().map(|&i| self.frame_rect(i)).collect();
         if let Some(k) = nearest(self.frame_rect(cur), &rects, dir) {
@@ -231,7 +242,9 @@ impl State {
     }
 
     pub fn swap_dir(&mut self, dir: Dir) {
-        let Some(cur) = self.focused_toplevel().filter(|&i| self.is_tiled(i)) else { return };
+        let Some(cur) = self.focused_toplevel().filter(|&i| self.is_tiled(i)) else {
+            return;
+        };
         let cands: Vec<usize> = self.visible_order().into_iter().filter(|&i| i != cur && self.is_tiled(i)).collect();
         let rects: Vec<Rect> = cands.iter().map(|&i| self.frame_rect(i)).collect();
         if let Some(k) = nearest(self.frame_rect(cur), &rects, dir) {
@@ -256,7 +269,9 @@ impl State {
     }
 
     pub fn move_to_workspace(&mut self, ws: u32) {
-        let Some(i) = self.focused_toplevel() else { return };
+        let Some(i) = self.focused_toplevel() else {
+            return;
+        };
         if ws == self.windows[i].workspace || !(1..=9).contains(&ws) {
             return;
         }
@@ -275,7 +290,9 @@ impl State {
     /// Float a tiled window (centered, a comfortable size) or tile a
     /// floating one.
     pub fn toggle_floating(&mut self) {
-        let Some(i) = self.focused_toplevel() else { return };
+        let Some(i) = self.focused_toplevel() else {
+            return;
+        };
         // Windows that can't resize (min = max) or dialogs stay floating.
         let w = &self.windows[i];
         if w.floating && ((w.min_size.0 > 0 && w.min_size == w.max_size) || w.has_parent) {
@@ -298,7 +315,9 @@ impl State {
     }
 
     pub fn toggle_maximize(&mut self) {
-        let Some(i) = self.focused_toplevel() else { return };
+        let Some(i) = self.focused_toplevel() else {
+            return;
+        };
         self.windows[i].maximized = !self.windows[i].maximized;
         self.relayout();
     }

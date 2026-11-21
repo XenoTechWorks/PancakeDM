@@ -5,6 +5,11 @@
 //! password field, in the style of the rest of the shell. Arrows switch
 //! users, Enter logs in. Without greetd (no $GREETD_SOCK) it runs in demo
 //! mode and accepts any password, for testing.
+//!
+//! With `--lock` it's the lock screen instead: it only unlocks the user
+//! who is running it, checks the password with PAM's `unix_chkpwd`
+//! helper, and exits successfully when it's right (the compositor treats
+//! that as "unlock" and respawns the lock screen if it ever dies).
 
 mod greetd;
 
@@ -55,9 +60,7 @@ fn users() -> Vec<User> {
             let display = f.get(4).and_then(|g| g.split(',').next()).filter(|g| !g.is_empty()).unwrap_or(&f[0]).to_string();
             let home = f.get(5).copied().unwrap_or("");
             // ~/.face, then AccountsService's icon.
-            let avatar = [format!("{home}/.face"), format!("/var/lib/AccountsService/icons/{name}")]
-                .iter()
-                .find_map(|p| images::load(std::path::Path::new(p), None));
+            let avatar = [format!("{home}/.face"), format!("/var/lib/AccountsService/icons/{name}")].iter().find_map(|p| images::load(std::path::Path::new(p), None));
             Some(User { name, display, avatar })
         })
         .collect()
@@ -85,6 +88,7 @@ struct Greeter {
     clicked: Option<(f64, f64)>,
     buffer_free: [bool; 2],
     shake: Option<Instant>,
+    lock: bool,
 }
 
 fn main() {
@@ -100,7 +104,8 @@ fn run() -> Result<(), String> {
     let mut icons = Icons::new(&cfg.icon_theme);
     let accent = 0xff00_0000 | pancake_draw::accent::effective(&cfg);
     let scale = cfg.scale;
-    let mut greetd = Greetd::connect();
+    let lock_mode = std::env::args().any(|a| a == "--lock");
+    let mut greetd = if lock_mode { None } else { Greetd::connect() };
     let session_cmd = std::env::var("PANCAKE_GREETER_SESSION").unwrap_or_else(|_| "pancake-session".into());
     let hostname = pancake_fetch::hostname().unwrap_or_default();
 
@@ -129,7 +134,11 @@ fn run() -> Result<(), String> {
         current: 0,
         users,
         password: String::new(),
-        message: greetd.is_none().then(|| ("Demo mode: greetd isn't running, any password works".to_string(), false)),
+        message: if lock_mode {
+            Some(("Locked. Type your password to unlock".to_string(), false))
+        } else {
+            greetd.is_none().then(|| ("Demo mode: greetd isn't running, any password works".to_string(), false))
+        },
         phase: Phase::Typing,
         xkb: None,
         keys: Vec::new(),
@@ -137,9 +146,19 @@ fn run() -> Result<(), String> {
         clicked: None,
         buffer_free: [true; 2],
         shake: None,
+        lock: lock_mode,
     };
+    if lock_mode {
+        // Only the person logged in can unlock.
+        let me = pancake_fetch::user().unwrap_or_default();
+        g.users.retain(|u| u.name == me);
+    }
     if g.users.is_empty() {
-        g.users.push(User { name: pancake_fetch::user().unwrap_or_else(|| "user".into()), display: "User".into(), avatar: None });
+        g.users.push(User {
+            name: pancake_fetch::user().unwrap_or_else(|| "user".into()),
+            display: "User".into(),
+            avatar: None,
+        });
     }
     let mut bufs: Vec<(wl_buffer::WlBuffer, memmap2::MmapMut, (u32, u32))> = Vec::new();
     let mut hits: Vec<((f32, f32, f32, f32), &'static str)> = Vec::new();
@@ -161,10 +180,20 @@ fn run() -> Result<(), String> {
                     redraw(&mut g, &mut bufs, &shm, &qh, &surface, &mut fonts, &mut icons, accent, scale, &hostname, &mut hits)?;
                     conn.flush().ok();
                     let user = g.users[g.current].name.clone();
-                    match login(&mut greetd, &user, &g.password, &session_cmd) {
+                    let result = if lock_mode { check_password(&user, &g.password) } else { login(&mut greetd, &user, &g.password, &session_cmd) };
+                    match result {
                         Ok(()) => {
                             g.phase = Phase::Done;
-                            g.message = Some((if greetd.is_some() { "Welcome!".into() } else { format!("Demo: would start {session_cmd} for {user}") }, false));
+                            g.message = Some((
+                                if lock_mode {
+                                    "Unlocked".into()
+                                } else if greetd.is_some() {
+                                    "Welcome!".into()
+                                } else {
+                                    format!("Demo: would start {session_cmd} for {user}")
+                                },
+                                false,
+                            ));
                             done_at = Some(Instant::now());
                         }
                         Err(e) => {
@@ -232,6 +261,27 @@ fn run() -> Result<(), String> {
         queue.dispatch_pending(&mut g).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Check a password with PAM's unix_chkpwd helper (it reads "password\0"
+/// on stdin and exits 0 when right). Only works for the user running it.
+fn check_password(user: &str, password: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let helper = ["/usr/bin/unix_chkpwd", "/sbin/unix_chkpwd", "/usr/sbin/unix_chkpwd", "/usr/lib/unix_chkpwd"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .ok_or("Can't check passwords here (no unix_chkpwd)")?;
+    let mut child = Command::new(helper).args([user, "nullok"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("can't run {helper}: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let _ = stdin.write_all(password.as_bytes());
+    let _ = stdin.write_all(&[0]);
+    drop(stdin);
+    if child.wait().map_err(|e| e.to_string())?.success() {
+        Ok(())
+    } else {
+        Err("Wrong password".into())
+    }
 }
 
 fn run_cmd(cmd: &str, args: &[&str]) {
@@ -324,71 +374,70 @@ fn redraw(
         }
         g.buffer_free = [true; 2];
     }
-    let Some(i) = (0..2).find(|&i| g.buffer_free[i]) else { return Ok(()) };
+    let Some(i) = (0..2).find(|&i| g.buffer_free[i]) else {
+        return Ok(());
+    };
     let px = pancake_draw::pixels(&mut bufs[i].1);
     let mut c = Canvas::new(px, w as i32, h as i32, scale as f32);
     hits.clear();
     let (w, h) = (w as f32, h as f32);
     c.px.fill(0);
-    c.rounded_rect(0.0, 0.0, w, h, 0.0, 0x8c0f0b09); // dim the wallpaper
+    c.rounded_rect(0.0, 0.0, w, h, 0.0, 0x720b0908); // keep the wallpaper present
 
-    // Card.
-    let (cw, ch) = (440.0, 520.0);
+    // Treat identity like the media card treats an album: artwork at left,
+    // title and secondary information beside it, and one clear control row.
+    let (cw, ch) = (520.0, 210.0);
     let shake = g.shake.filter(|t| t.elapsed() < Duration::from_millis(400)).map(|t| {
         let p = t.elapsed().as_secs_f32() / 0.4;
         (p * 6.0 * std::f32::consts::TAU).sin() * 12.0 * (1.0 - p)
     });
-    let cx = (w - cw) / 2.0 + shake.unwrap_or(0.0);
-    let cy = (h - ch) / 2.0;
-    c.rounded_rect(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0, 29.0, GLASS_EDGE);
-    c.rounded_rect(cx, cy, cw, ch, 28.0, 0xe61f1a17);
-    let mid = cx + cw / 2.0;
+    let cx = 48.0 + shake.unwrap_or(0.0);
+    let cy = h - ch - 48.0;
+    c.rounded_rect(cx, cy, cw, ch, 18.0, 0xf21c1815);
 
     let now = Local::now();
     let time = now.format("%H:%M").to_string();
-    let tw = fonts.width(&time, 64.0, true);
-    c.text(fonts, &time, mid - tw / 2.0, cy + 92.0, 64.0, true, TEXT);
+    c.text(fonts, &time, 48.0, 118.0, 58.0, true, TEXT);
     let date = now.format("%A, %-d %B").to_string();
-    let dw = fonts.width(&date, 16.0, true);
-    c.text(fonts, &date, mid - dw / 2.0, cy + 124.0, 16.0, true, accent);
+    c.text(fonts, &date, 51.0, 148.0, 15.0, false, TEXT_DIM);
 
-    // Avatar with an accent ring, and the name (arrows when several users).
+    // Identity row.
     let user = &g.users[g.current];
-    c.circle(mid, cy + 214.0, 56.0, accent);
-    c.circle(mid, cy + 214.0, 52.0, 0xff1f1a17);
-    let size = (100.0 * scale as f32) as u32;
+    let (avx, avy) = (cx + 72.0, cy + 82.0);
+    c.circle(avx + 2.0, avy + 5.0, 53.0, 0x40000000);
+    c.circle(avx, avy, 52.0, 0x24ffffff);
+    let size = (96.0 * scale as f32) as u32;
     let av = avatar(user, size);
-    c.image(&av, (mid - 50.0) as i32, (cy + 164.0) as i32);
+    c.image(&av, (avx - 48.0) as i32, (avy - 48.0) as i32);
     if user.avatar.is_none() {
         let letter: String = user.display.chars().next().map(|ch| ch.to_uppercase().collect()).unwrap_or_default();
-        let lw = fonts.width(&letter, 44.0, true);
-        c.text(fonts, &letter, mid - lw / 2.0, cy + 230.0, 44.0, true, accent);
+        let lw = fonts.width(&letter, 36.0, true);
+        c.text(fonts, &letter, avx - lw / 2.0, avy + 12.0, 36.0, true, accent);
     }
-    let name = fonts.fit(&user.display, 20.0, true, cw - 120.0);
-    let nw = fonts.width(&name, 20.0, true);
-    c.text(fonts, &name, mid - nw / 2.0, cy + 304.0, 20.0, true, TEXT);
+    let tx = cx + 142.0;
+    let name = fonts.fit(&user.display, 20.0, true, cw - 182.0);
+    c.text(fonts, &name, tx, cy + 43.0, 20.0, true, TEXT);
     if user.display != user.name {
-        let uw = fonts.width(&user.name, 12.0, false);
-        c.text(fonts, &user.name, mid - uw / 2.0, cy + 324.0, 12.0, false, TEXT_FAINT);
+        c.text(fonts, &user.name, tx, cy + 62.0, 12.0, false, TEXT_FAINT);
     }
     if g.users.len() > 1 {
-        for (dx, what, label) in [(-150.0, "prev", "‹"), (150.0, "next", "›")] {
-            let r = (mid + dx - 18.0, cy + 196.0, 36.0, 36.0);
-            c.circle(mid + dx, cy + 214.0, 18.0, SUBTLE);
-            let lw = fonts.width(label, 22.0, true);
-            c.text(fonts, label, mid + dx - lw / 2.0, cy + 222.0, 22.0, true, TEXT);
+        for (dx, what, label) in [(0.0, "prev", "‹"), (32.0, "next", "›")] {
+            let bx = cx + cw - 66.0 + dx;
+            let r = (bx - 14.0, cy + 24.0, 28.0, 28.0);
+            let lw = fonts.width(label, 18.0, true);
+            c.text(fonts, label, bx - lw / 2.0, cy + 43.0, 18.0, true, TEXT_DIM);
             hits.push((r, what));
         }
     }
 
     // Password field.
-    let (fx, fy, fw, fh) = (cx + 40.0, cy + 352.0, cw - 80.0, 52.0);
+    let (fx, fy, fw, fh) = (tx, cy + 82.0, cw - (tx - cx) - 22.0, 48.0);
     let focused_ring = if g.message.as_ref().is_some_and(|(_, e)| *e) { 0xffbc4b51 } else { accent };
     c.rounded_rect(fx - 2.0, fy - 2.0, fw + 4.0, fh + 4.0, 18.0, focused_ring);
     c.rounded_rect(fx, fy, fw, fh, 16.0, 0xff2a231e);
     if g.password.is_empty() {
         let hint = "Password";
-        c.text(fonts, hint, fx + 20.0, fy + 33.0, 16.0, false, TEXT_FAINT);
+        c.text(fonts, hint, fx + 16.0, fy + 32.0, 15.0, false, TEXT_FAINT);
     } else {
         let n = g.password.chars().count().min(24);
         for k in 0..n {
@@ -396,7 +445,7 @@ fn redraw(
         }
     }
     if matches!(g.phase, Phase::Typing) {
-        let caret_x = fx + 20.0 + g.password.chars().count().min(24) as f32 * 15.0 + if g.password.is_empty() { 0.0 } else { 6.0 };
+        let caret_x = fx + 16.0 + g.password.chars().count().min(24) as f32 * 15.0 + if g.password.is_empty() { 0.0 } else { 6.0 };
         c.rounded_rect(caret_x, fy + 14.0, 2.0, 24.0, 1.0, accent);
     }
     let enter = (fx + fw - 44.0, fy + 8.0, 36.0, 36.0);
@@ -411,16 +460,16 @@ fn redraw(
 
     if let Some((msg, err)) = &g.message {
         let msg = fonts.fit(msg, 13.0, false, cw - 60.0);
-        let mw = fonts.width(&msg, 13.0, false);
-        c.text(fonts, &msg, mid - mw / 2.0, cy + 440.0, 13.0, false, if *err { 0xffe8848a } else { TEXT_DIM });
+        c.text(fonts, &msg, tx, cy + 158.0, 13.0, false, if *err { 0xffe8848a } else { TEXT_DIM });
     }
-    let hint = "Enter to log in · arrows switch user";
+    let hint = if g.lock { "Enter to unlock" } else { "Enter to log in · arrows switch user" };
     let hw = fonts.width(hint, 11.0, false);
-    c.text(fonts, hint, mid - hw / 2.0, cy + ch - 26.0, 11.0, false, TEXT_FAINT);
+    c.text(fonts, hint, cx + cw - 22.0 - hw, cy + ch - 18.0, 11.0, false, TEXT_FAINT);
 
     // Corner: host name and power buttons.
     c.text(fonts, hostname, 24.0, h - 24.0, 13.0, true, TEXT_DIM);
-    for (k, (what, icon)) in [("poweroff", "system-shutdown-symbolic"), ("reboot", "system-reboot-symbolic")].iter().enumerate() {
+    let power_buttons: &[(&str, &str)] = if g.lock { &[] } else { &[("poweroff", "system-shutdown-symbolic"), ("reboot", "system-reboot-symbolic")] };
+    for (k, (what, icon)) in power_buttons.iter().enumerate() {
         let bx = w - 48.0 - k as f32 * 48.0;
         let r = (bx - 18.0, h - 54.0, 36.0, 36.0);
         let hover = g.pointer.is_some_and(|(x, y)| {
@@ -458,7 +507,11 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for Greeter {
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for Greeter {
     fn event(g: &mut Self, _: &wl_keyboard::WlKeyboard, event: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         match event {
-            wl_keyboard::Event::Keymap { format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
+            wl_keyboard::Event::Keymap {
+                format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
+                fd,
+                size,
+            } => {
                 let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
                 // Safety: the compositor sent a keymap of `size` bytes.
                 if let Ok(Some(km)) = unsafe { xkb::Keymap::new_from_fd(&ctx, fd, size as usize, xkb::KEYMAP_FORMAT_TEXT_V1, xkb::KEYMAP_COMPILE_NO_FLAGS) } {
@@ -470,7 +523,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Greeter {
                     s.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                 }
             }
-            wl_keyboard::Event::Key { key, state: WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => g.keys.push(key),
+            wl_keyboard::Event::Key {
+                key,
+                state: WEnum::Value(wl_keyboard::KeyState::Pressed),
+                ..
+            } => g.keys.push(key),
             _ => {}
         }
     }
@@ -483,7 +540,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Greeter {
                 g.pointer = Some((surface_x, surface_y));
                 g.dirty = true;
             }
-            wl_pointer::Event::Button { state: WEnum::Value(wl_pointer::ButtonState::Pressed), .. } => g.clicked = g.pointer,
+            wl_pointer::Event::Button {
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed), ..
+            } => g.clicked = g.pointer,
             _ => {}
         }
     }
