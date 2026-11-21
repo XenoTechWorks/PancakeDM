@@ -15,7 +15,7 @@ pancakes.
 
 | | |
 |---|---|
-| ![Tiling](docs/screenshots/tiling.png) | ![Control center](docs/screenshots/control-center.png) |
+| ![Tiling](docs/screenshots/tiling.png) |  |
 | ![Lock screen](docs/screenshots/lock.png) | ![Notifications](docs/screenshots/notifications.png) |
 
 ![Calendar reminder](docs/screenshots/reminder.png)
